@@ -19,7 +19,9 @@ class preprocess(Data):
 
         self._estimate_orientation()
         self._compute_euler_angles()
-        self._compute_features()
+        self._angle_to_trigonometric()
+        self._combine_features()        
+        #self._downsampling(factor=2)  # 降采样到50Hz
         return self
 
     #madgwick算法估计姿态四元数
@@ -109,12 +111,33 @@ class preprocess(Data):
         self.euler_angles = np.stack([roll, pitch, yaw], axis=1)
         return self
 
-    def compute_features(self):
-        """拼接 9 轴特征：acc(3) + gyro(3) + euler(3)。"""
-        if self.euler_angles is None:
-            raise RuntimeError("请先运行 compute_euler_angles()")
-        self.features = np.hstack([self.acc, self.gyro, self.euler_angles])
+    #将欧拉角转化为三角函数
+    def _angle_to_trigonometric(self):
+        roll = self.euler_angles[:, 0]
+        pitch = self.euler_angles[:, 1]
+        yaw = self.euler_angles[:, 2]
+
+        roll_sin = np.sin(np.deg2rad(roll))
+        roll_cos = np.cos(np.deg2rad(roll))
+        pitch_sin = np.sin(np.deg2rad(pitch))
+        pitch_cos = np.cos(np.deg2rad(pitch))
+        yaw_sin = np.sin(np.deg2rad(yaw))
+        yaw_cos = np.cos(np.deg2rad(yaw))
+        self.trig = np.stack([roll_sin, roll_cos, pitch_sin, pitch_cos, yaw_sin, yaw_cos], axis=1)
         return self
+
+    
+    #拼接为9轴数据
+    def _combine_features(self):
+        if self.trig is None:
+            raise RuntimeError("请先运行 _angle_to_trigonometric()")
+        self.features = np.hstack([self.acc, self.gyro, self.euler_angles, self.trig])
+        return self
+    
+    #降采样
+    def _downsampling(self, factor):
+        self.features = self.features[::factor]
+        self.time = self.time[::factor]
 
     #预处理完成保存为.npz格式文件
     def save(self, out_dir):
@@ -133,9 +156,9 @@ class preprocess(Data):
         )
 
 
+
+
 proc = preprocess("Test_File/A5_C5_C5-c8.csv")
 proc.preprocess()
-print(proc.euler_angles.shape)      # 期望 (186078, 3)
-print(np.abs(proc.euler_angles[:, :2]).max())  # roll/pitch 应在合理范围（<180）
 proc.save("output")
 # 检查 output/A5_C5_C5-c8.npz 是否生成
