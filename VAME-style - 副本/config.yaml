@@ -1,0 +1,45 @@
+# VAME-Style v4.0 配置（唯一入口）
+# 所有上游路径只读；本仓库产物一律写入 VAME-Style/ 内部。
+
+workspace: F:\Kimi\IMU
+
+data:
+  # 25 Hz 抗混叠降采样 npz（上游产物，只读）
+  dir: F:\Kimi\IMU\VAME-IMU\data\ds25
+  sessions: [rec_000, rec_001, rec_002, rec_003, rec_004, rec_005, rec_006,
+             rec_007, rec_008, rec_009, rec_010, rec_011, rec_012, rec_013]
+  # 试点三门评估用（跨 2 实验批次）
+  pilot: [rec_000, rec_005, rec_010]
+  # 下游验证排除：安装角偏离群体 50°–60°（2026-09-28 拍板），训练/拟合口径另见 hmm.subset
+  exclude: [rec_011, rec_013]
+  fs: 25.0
+
+vame:
+  # 训练工程（自有副本，见 runs/ 说明）；epoch 状态见 runs 内 chunk_metrics.jsonl
+  project_dir: F:\Kimi\IMU\VAME-Style\runs\vame_25hz_14s\vame_project
+  total_epochs: 80
+  epochs_per_chunk: 4      # 每块 ≤300 s（前台超时线）
+  zdims: 16
+  time_window: 30          # 25 Hz 下 1.2 s；latent 长 = T - 29
+
+features:
+  hand_dim: 12             # log能量(1) + 频带能量(8) + grav姿态(3)
+  band_n: 8
+  band_fmax: 12.0          # 25 Hz 奈奎斯特联动
+  win: 75                  # 3 s 特征窗
+  robust_z: true
+
+hmm:
+  k_candidates: [12, 20, 30, 39, 50, 60]   # 14 条全量初扫（已完成，见 k_sweep.csv）
+  k_refine_range: [20, 39]                # 12 条验证子集逐点细扫（用户拍板 2026-09-28）
+  subset: v12                             # 当前定档口径：排除 rec_011/013 的拟合+验证
+  n_iter: 30
+  covariance_type: full
+  sticky: 0.98
+  n_sub: 100000
+  seed: 0
+
+posture:
+  kb: 4                    # 姿态桶数（流形图确认后定稿）
+  ref_frame: gravity_vertical   # 重力分量垂直的位置为零点
+  prune: 0.01              # 联合谱剪枝阈值
