@@ -82,26 +82,30 @@ class Decoder(nn.Module):
         # z: (B, T, z_dim)
         return self.mlp(z)  # (B, T, out_features)
     
-
+# 模型训练全程封装
 class PoseVAE(nn.Module):
     def __init__(self, in_features=5, z_dim=6):
         super().__init__()
+
         self.encoder = Encoder(in_features=in_features)
         self.lmbda = Lambda(hidden_size=64, z_dim=z_dim)
         self.decoder = Decoder(z_dim=z_dim, out_features=in_features)
-
+        self.receptive_field = self.encoder.receptive_field
+        
     def forward(self, x):
-        # TODO: x → encoder → lmbda → decoder
-        # 返回 x_recon, mu, logvar（损失函数要用后两个）
         h = self.encoder(x)
         z, mu, logvar = self.lmbda(h)
         x_recon = self.decoder(z)
         return x_recon, mu, logvar
 
 
-if __name__ == "__main__":
-    model = PoseVAE(in_features=5, z_dim=6)
-    x = torch.randn(4, 500, 5)
-    x_recon, mu, logvar = model(x)
-    print(x_recon.shape, mu.shape, logvar.shape)
-    # 期望: torch.Size([4, 500, 5]) torch.Size([4, 500, 6]) torch.Size([4, 500, 6])
+
+#损失函数
+
+def reconstruction_loss(x_recon, x):
+    recon_loss = F.mse_loss(x_recon, x)
+    return recon_loss
+
+def kl_loss(mu, logvar):
+    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - torch.exp(logvar))
+    return kl

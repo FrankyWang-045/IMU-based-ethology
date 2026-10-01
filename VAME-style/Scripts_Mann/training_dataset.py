@@ -12,10 +12,13 @@ class PoseDataset(Dataset):
         trig = feats[:, 9:13]             # 通道正弦/余弦值
         wz = feats[:, 5:6]                  # gyro z
         print(trig.shape)
-        wz_mean = wz.mean()
-        wz_std = wz.std()
-        wz_zscore = (wz - wz_mean) / wz_std
-        self.x = np.hstack([trig, wz_zscore]).astype(np.float32)
+        self.wz_mean = wz.mean()
+        self.wz_std = wz.std()
+        wz_zscore = (wz - self.wz_mean) / self.wz_std
+        x_raw = np.hstack([trig, wz])                  # (N, 5)，wz 不再单独处理
+        self.x_mean = x_raw.mean(axis=0)               # (5,) 逐轴均值
+        self.x_std = x_raw.std(axis=0)                 # (5,) 逐轴标准差
+        self.x = ((x_raw - self.x_mean) / self.x_std).astype(np.float32)
         self.chunk = chunk
         self.n_frames = len(self.x)
 
@@ -28,10 +31,3 @@ class PoseDataset(Dataset):
         block = self.x[start : start + self.chunk]     # (chunk, 5)
         return torch.from_numpy(block)
 
-
-ds = PoseDataset("output/A5_C5_C5-c8.npz", chunk=1000)
-loader = DataLoader(ds, batch_size=32, shuffle=True, num_workers=0)
-
-for batch in loader:
-    print(batch.shape)   # torch.Size([32, 1000, 5])
-    break
