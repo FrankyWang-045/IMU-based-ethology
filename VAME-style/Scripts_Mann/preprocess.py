@@ -2,9 +2,9 @@ from data import Data
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+from utils import ROOT, load_config, output_dir
 
-
-class preprocess(Data):
+class DataPreprocess(Data):
     '''IMU数据预处理类，继承自Data类，包括预处理方法：Madgwick滤波、通道分割、设备安装反转识别、降采样'''
     def __init__(self, file_path, beta=0.1):
         super().__init__(file_path)
@@ -158,7 +158,28 @@ class preprocess(Data):
 
 
 
-proc = preprocess("Test_File/A5_C5_C5-c8.csv")
-proc.preprocess()
-proc.save("output")
-# 检查 output/A5_C5_C5-c8.npz 是否生成
+def preprocess_all(cfg):
+    """批量预处理：raw_dir 下所有 csv -> output_dir 下的 npz。"""
+    raw_dir = ROOT / cfg["project"]["raw_dir"]
+    out = output_dir(cfg)
+    beta = cfg["preprocess"]["madgwick_beta"]
+
+    csv_files = sorted(raw_dir.glob("*.csv"))
+    if not csv_files:
+        raise FileNotFoundError(f"{raw_dir} 中没有 csv 文件")
+
+    for csv_path in csv_files:
+        out_path = out / f"{csv_path.stem}.npz"
+        if out_path.exists():
+            print(f"跳过（已存在）: {csv_path.stem}")
+            continue
+        print(f"处理中: {csv_path.name}")
+        proc = DataPreprocess(csv_path, beta=beta)
+        proc.preprocess()
+        proc.save(out)
+    print("全部预处理完成")
+
+
+if __name__ == "__main__":
+    from utils import load_config
+    preprocess_all(load_config())

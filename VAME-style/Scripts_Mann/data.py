@@ -23,7 +23,6 @@ class Data:
         return df
 
 
-
 #批量加载文件夹中的 IMU 文件，返回 IMURecording 列表。
 def load_recordings(folder, pattern="*.csv"):
     folder = Path(folder)
@@ -32,6 +31,9 @@ def load_recordings(folder, pattern="*.csv"):
     recordings = [Data(f) for f in files]
 
     return recordings
+
+
+
 
 if __name__ == "__main__":
     recordings = load_recordings("Test_File/")

@@ -1,40 +1,62 @@
+"""重构质量评估：用指定实验的模型对一段连续数据做重构对比。"""
+
+import sys
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
 from model import PoseVAE
-from training_dataset import PoseDataset
+from training_dataset import load_raw_x
+from utils import load_config, output_dir, latest_experiment_dir
 
-# 1. 加载模型
-ckpt = torch.load("output/pose_vae.pt", weights_only=False)
-model = PoseVAE(**ckpt["config"])
-model.load_state_dict(ckpt["model_state"])
-model.eval()
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# 2. 准备一段连续数据（不要随机裁剪！取序列中间 2000 帧）
-ds = PoseDataset("output/A5_C5_C5-c8.npz")
-seg = torch.from_numpy(ds.x[50000:52000]).unsqueeze(0)  # (1, 2000, 5)
 
-# 3. 前向
-with torch.no_grad():
-    x_recon, mu, logvar = model(seg)
+def main():
+    cfg = load_config()
+    exp_dir = (output_dir(cfg) / sys.argv[1]) if len(sys.argv) > 1 \
+        else latest_experiment_dir(cfg)
 
-w = model.receptive_field - 1
-x = seg[0, w:].numpy()
-recon = x_recon[0, w:].numpy()
-z = mu[0, w:].numpy()          # eval 模式下 Lambda 返回 mu 作为 z
+    ckpt = torch.load(exp_dir / "pose_vae.pt",
+                      map_location=device, weights_only=False)
+    model = PoseVAE(**ckpt["config"]).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
 
-# 4. 画图
-fig, axes = plt.subplots(5 + 1, 1, figsize=(14, 12), sharex=True)
-names = ["sin_roll", "cos_roll", "sin_pitch", "cos_pitch", "wz"]
-for i, ax in enumerate(axes[:5]):
-    ax.plot(x[:, i], label="true", alpha=0.8)
-    ax.plot(recon[:, i], label="recon", alpha=0.8)
-    ax.set_ylabel(names[i])
-    ax.legend(loc="upper right")
-for d in range(z.shape[1]):    # 6 维 latent 画在一起
-    axes[5].plot(z[:, d], alpha=0.7)
-axes[5].set_ylabel("latent z")
-plt.tight_layout()
-plt.savefig("output/eval_recon.png", dpi=150)
-plt.show()
+    npz_files = [p for p in sorted(output_dir(cfg).glob("*.npz"))
+                 if not p.stem.endswith(("_latent", "_hmm"))]
+    x_all = load_raw_x(npz_files[0])
+    x = (x_all - ckpt["x_mean"]) / ckpt["x_std"]
+
+    mid = len(x) // 2
+    seg = torch.from_numpy(x[mid:mid + 2000].astype(np.float32))
+    seg = seg.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        x_recon, mu, _ = model(seg)
+
+    w = model.receptive_field - 1
+    true = seg[0, w:].cpu().numpy()
+    recon = x_recon[0, w:].cpu().numpy()
+    z = mu[0, w:].cpu().numpy()
+
+    names = ["sin_roll", "cos_roll", "sin_pitch", "cos_pitch", "wz"]
+    fig, axes = plt.subplots(6, 1, figsize=(14, 12), sharex=True)
+    for i, ax in enumerate(axes[:5]):
+        ax.plot(true[:, i], label="true", alpha=0.8)
+        ax.plot(recon[:, i], label="recon", alpha=0.8)
+        ax.set_ylabel(names[i])
+        ax.legend(loc="upper right")
+    for d in range(z.shape[1]):
+        axes[5].plot(z[:, d], alpha=0.7)
+    axes[5].set_ylabel("latent z")
+
+    fig.tight_layout()
+    fig.savefig(exp_dir / "eval_recon.png", dpi=150)
+    plt.show()
+    print(f"已保存到 {exp_dir / 'eval_recon.png'}")
+
+
+if __name__ == "__main__":
+    main()

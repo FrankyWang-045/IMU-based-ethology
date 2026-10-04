@@ -1,24 +1,24 @@
-"""全序列 latent 提取脚本。
+"""批量 latent 提取：对所有预处理 npz，用指定实验的模型生成下游特征。
 
-流程：加载 npz -> 用 checkpoint 统计量标准化 -> 整段前向 -> 裁剪预热帧
-      -> (预留旁路接口) -> 保存下游特征 npz。
+用法：
+    python embed.py            # 默认使用最新的实验目录
+    python embed.py exp_001    # 指定实验目录
 """
+
+import sys
 
 import numpy as np
 import torch
 
 from model import PoseVAE
-
-NPZ_PATH = "output/A5_C5_C5-c8.npz"
-CKPT_PATH = "output/pose_vae.pt"
-OUT_PATH = "output/A5_C5_C5-c8_latent.npz"
+from utils import load_config, output_dir, latent_path, latest_experiment_dir
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_model(ckpt_path, device):
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    print(ckpt.keys())
+def load_model(exp_dir, device):
+    ckpt = torch.load(exp_dir / "pose_vae.pt",
+                      map_location=device, weights_only=False)
     model = PoseVAE(**ckpt["config"]).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -27,60 +27,60 @@ def load_model(ckpt_path, device):
 
 def build_vae_input(feats, x_mean, x_std):
     """从 features 矩阵构造 VAE 输入，用训练时的统计量标准化。"""
-    trig = feats[:, 9:13]        # sin/cos 四轴
-    wz = feats[:, 5:6]           # gyro z
+    trig = feats[:, 9:13]
+    wz = feats[:, 5:6]
     x_raw = np.hstack([trig, wz])
-    x_stdized = (x_raw - x_mean) / x_std
-    return x_stdized.astype(np.float32)
+    return ((x_raw - x_mean) / x_std).astype(np.float32)
 
 
 def extract_latent(model, x, device):
     """整段前向，eval 模式下取 mu 作为每帧 latent。"""
-    x_t = torch.from_numpy(x).unsqueeze(0).to(device)   # (1, N, 5)
+    x_t = torch.from_numpy(x).unsqueeze(0).to(device)
     with torch.no_grad():
         _, mu, _ = model(x_t)
-    return mu[0].cpu().numpy()                          # (N, z_dim)
+    return mu[0].cpu().numpy()
 
 
 def build_bypass(feats):
-    """旁路特征接口（暂未实现）。
-
-    计划：lin_acc(3) + wx, wy(2)，z-score 后与 latent 拼接。
-    返回形状应为 (N, n_bypass)。
-    """
+    """旁路特征接口（暂未实现）。返回 None 时跳过拼接。"""
     return None
 
 
-def main():
-    model, ckpt = load_model(CKPT_PATH, device)
-    warmup = ckpt["receptive_field"] - 1
-
-    data = np.load(NPZ_PATH)
+def embed_file(npz_path, model, ckpt, out_path):
+    """处理单个文件：npz -> latent npz。"""
+    data = np.load(npz_path)
     feats = data["features"]
 
     x = build_vae_input(feats, ckpt["x_mean"], ckpt["x_std"])
     z = extract_latent(model, x, device)
 
     bypass = build_bypass(feats)
-    if bypass is not None:
-        downstream = np.hstack([z, bypass])
-    else:
-        downstream = z
+    downstream = z if bypass is None else np.hstack([z, bypass])
 
-    # 裁剪预热帧：latent、时间戳、掩码必须同步，保证逐帧对齐
+    warmup = model.receptive_field - 1
     downstream = downstream[warmup:].astype(np.float32)
     time = data["time"][warmup:]
     interp_mask = data["interp_mask"][warmup:]
-
     assert len(downstream) == len(time) == len(interp_mask), "长度对齐失败"
 
-    np.savez_compressed(
-        OUT_PATH,
-        downstream=downstream,
-        time=time,
-        interp_mask=interp_mask,
-    )
-    print(f"下游特征: {downstream.shape}  时间点数: {len(time)}  已保存到 {OUT_PATH}")
+    np.savez_compressed(out_path, downstream=downstream,
+                        time=time, interp_mask=interp_mask)
+    print(f"  {npz_path.stem}: {downstream.shape}")
+
+
+def main():
+    cfg = load_config()
+    exp_dir = (output_dir(cfg) / sys.argv[1]) if len(sys.argv) > 1 \
+        else latest_experiment_dir(cfg)
+    print(f"使用模型: {exp_dir}")
+
+    model, ckpt = load_model(exp_dir, device)
+    npz_files = [p for p in sorted(output_dir(cfg).glob("*.npz"))
+                 if not p.stem.endswith(("_latent", "_hmm"))]
+
+    for npz_path in npz_files:
+        embed_file(npz_path, model, ckpt, latent_path(cfg, npz_path.stem))
+    print("全部提取完成")
 
 
 if __name__ == "__main__":

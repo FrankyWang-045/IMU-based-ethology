@@ -2,8 +2,8 @@
 
 project:
   name: imu_pose_vae
-  raw_dir: Test_File              # 原始 csv 文件夹
-  output_dir: output              # 所有产物的根目录
+  raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\Test              # 原始 csv 文件夹
+  output_dir: F:\IMU_computational_ethology\IMU-based-ethology\VAME-style\output_raw             # 所有产物的根目录
 
 preprocess:
   gyro_unit: deg                  # 角速度单位，Madgwick 会转成 rad
@@ -22,13 +22,18 @@ model:
 
 train:
   batch_size: 32
-  epochs: 100
+  epochs: 150
   lr: 0.001
   kl_beta: 0.1
   seed: 0
 
 hmm:
-  n_states: 6
-  n_seeds: 10
+  n_states: 9
+  n_seeds: 1
   n_iter: 100
   covariance_type: diag
+
+hmm_scan:
+  k_list: [3,5,7,9,11]
+  n_seeds: 1
+  sample_frames: 40000
