@@ -99,6 +99,60 @@ class PoseVAE(nn.Module):
         return x_recon, mu, logvar
 
 
+class VectorQuantizer(nn.Module):
+    """向量量化层：把连续隐状态映射到共享码本的最近邻条目。
+
+    返回量化向量、码索引、VQ 损失（码本损失 + commitment 损失）。
+    梯度通过 straight-through 估计传回 Encoder。
+    """
+
+    def __init__(self, n_codes=64, z_dim=6, commitment=0.25):
+        super().__init__()
+        self.commitment = commitment
+        self.embedding = nn.Embedding(n_codes, z_dim)
+        nn.init.uniform_(self.embedding.weight, -1.0 / n_codes, 1.0 / n_codes)
+
+    def forward(self, h):
+        # h: (B, T, D)
+        B, T, D = h.shape
+        flat = h.reshape(-1, D)                                # (B*T, D)
+
+        # 每个隐向量找最近的码本条目
+        dists = (flat.pow(2).sum(1, keepdim=True)
+                 - 2 * flat @ self.embedding.weight.T
+                 + self.embedding.weight.pow(2).sum(1))
+        indices = dists.argmin(dim=1)                          # (B*T,)
+        z_q = self.embedding(indices).view(B, T, D)            # (B, T, D)
+
+        # 损失：码本向隐状态靠拢 + 隐状态向码本"承诺"（detach 分工）
+        codebook_loss = (z_q - h.detach()).pow(2).mean()
+        commitment_loss = (h - z_q.detach()).pow(2).mean()
+        vq_loss = codebook_loss + self.commitment * commitment_loss
+
+        # straight-through：前向用量化值，反向把梯度原样传给 h
+        z_q_st = h + (z_q - h).detach()
+
+        return z_q_st, indices.view(B, T), vq_loss
+
+
+class PoseVQVAE(nn.Module):
+    """VQ 版姿态 VAE：Encoder 复用，Lambda 替换为 VectorQuantizer。"""
+
+    def __init__(self, in_features=5, z_dim=6, n_codes=64, commitment=0.25):
+        super().__init__()
+        self.encoder = Encoder(in_features=in_features)
+        self.proj = nn.Linear(64, z_dim)          # 新增：隐状态(64) -> 码本维度(z_dim)
+        self.vq = VectorQuantizer(n_codes, z_dim, commitment)
+        self.decoder = Decoder(z_dim=z_dim, out_features=in_features)
+        self.receptive_field = self.encoder.receptive_field
+
+    def forward(self, x):
+        h = self.encoder(x)
+        z = self.proj(h)                          # (B, T, z_dim)
+        z_q, codes, vq_loss = self.vq(z)
+        x_recon = self.decoder(z_q)
+        return x_recon, z_q, codes, vq_loss
+
 
 #损失函数
 

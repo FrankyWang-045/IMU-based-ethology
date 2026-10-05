@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import ConcatDataset, DataLoader
 
-from model import PoseVAE, reconstruction_loss, kl_loss
+from model import PoseVQVAE, reconstruction_loss, kl_loss
 from training_dataset import PoseDataset, compute_stats
 from utils import ROOT, load_config, output_dir, new_experiment_dir
 
@@ -41,7 +41,8 @@ def main():
     print(f"验证文件: {sorted(val_files) or '无'}")
 
     # ---------- 模型 ----------
-    model = PoseVAE(in_features=mc["in_features"], z_dim=mc["z_dim"]).to(device)
+    model = PoseVQVAE(in_features=mc["in_features"], z_dim=mc["z_dim"],
+                      n_codes=mc.get("n_codes", 64)).to(device)
     warmup = model.receptive_field - 1
     optimizer = torch.optim.Adam(model.parameters(), lr=tc["lr"])
 
@@ -54,21 +55,17 @@ def main():
         #batch内循环
         for batch in loader:
             batch = batch.to(device)
-            x_recon, mu, logvar = model(batch)
+            x_recon, z_q, codes, vq_loss = model(batch)
 
-            #计算损失函数
             rec = reconstruction_loss(x_recon[:, warmup:], batch[:, warmup:])
-            kl = kl_loss(mu[:, warmup:], logvar[:, warmup:])
-            loss = rec + tc["kl_beta"] * kl
-            
-            #训练模型固定三步
-            optimizer.zero_grad()    #梯度清零
-            loss.backward()          #反向传播
-            optimizer.step()         #更新参数
+            loss = rec + vq_loss
 
-            #累计损失
-            total_rec += rec.item()    
-            total_kl += kl.item()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_rec += rec.item()
+            total_kl += vq_loss.item()      # 复用 kl 槽位记录 vq_loss，曲线代码不用改
 
         n = len(loader)
         avg_rec, avg_kl = total_rec / n, total_kl / n
@@ -84,7 +81,9 @@ def main():
         "x_mean": mean,
         "x_std": std,
         "receptive_field": model.receptive_field,
-        "config": {"in_features": mc["in_features"], "z_dim": mc["z_dim"]},
+        "config": {"in_features": mc["in_features"],
+                   "z_dim": mc["z_dim"],
+                   "n_codes": mc.get("n_codes", 64)},    # ← 补这行
     }, exp_dir / "pose_vae.pt")
     shutil.copy(ROOT / "config.yaml", exp_dir / "config.yaml")   # config 副本，保证可复现
 

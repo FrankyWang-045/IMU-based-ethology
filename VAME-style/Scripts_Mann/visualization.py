@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from model import PoseVAE
+from model import PoseVQVAE
 from training_dataset import load_raw_x
 from utils import load_config, output_dir, latest_experiment_dir
 
@@ -20,7 +20,7 @@ def main():
 
     ckpt = torch.load(exp_dir / "pose_vae.pt",
                       map_location=device, weights_only=False)
-    model = PoseVAE(**ckpt["config"]).to(device)
+    model = PoseVQVAE(**ckpt["config"]).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

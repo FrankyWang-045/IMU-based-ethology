@@ -10,8 +10,9 @@ import sys
 import numpy as np
 import torch
 
-from model import PoseVAE
 from utils import load_config, output_dir, latent_path, latest_experiment_dir
+from model import PoseVQVAE
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -19,7 +20,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def load_model(exp_dir, device):
     ckpt = torch.load(exp_dir / "pose_vae.pt",
                       map_location=device, weights_only=False)
-    model = PoseVAE(**ckpt["config"]).to(device)
+    model = PoseVQVAE(**ckpt["config"]).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     return model, ckpt
@@ -35,10 +36,11 @@ def build_vae_input(feats, x_mean, x_std):
 
 def extract_latent(model, x, device):
     """整段前向，eval 模式下取 mu 作为每帧 latent。"""
+def extract_latent(model, x, device):
     x_t = torch.from_numpy(x).unsqueeze(0).to(device)
     with torch.no_grad():
-        _, mu, _ = model(x_t)
-    return mu[0].cpu().numpy()
+        _, z_q, codes, _ = model(x_t)
+    return z_q[0].cpu().numpy(), codes[0].cpu().numpy()
 
 
 def build_bypass(feats):
@@ -52,7 +54,7 @@ def embed_file(npz_path, model, ckpt, out_path):
     feats = data["features"]
 
     x = build_vae_input(feats, ckpt["x_mean"], ckpt["x_std"])
-    z = extract_latent(model, x, device)
+    z, codes = extract_latent(model, x, device)
 
     bypass = build_bypass(feats)
     downstream = z if bypass is None else np.hstack([z, bypass])
@@ -64,9 +66,8 @@ def embed_file(npz_path, model, ckpt, out_path):
     assert len(downstream) == len(time) == len(interp_mask), "长度对齐失败"
 
     np.savez_compressed(out_path, downstream=downstream,
+                        codes=codes[warmup:],
                         time=time, interp_mask=interp_mask)
-    print(f"  {npz_path.stem}: {downstream.shape}")
-
 
 def main():
     cfg = load_config()

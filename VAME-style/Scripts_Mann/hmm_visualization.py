@@ -25,7 +25,8 @@ def main():
     states, time, z = hmm["states"], hmm["time"], lat["downstream"]
 
     # --- 图 A：20 秒窗口对照 ---
-    t0, t1 = 500, 520
+    t0, t1 = 600, 630
+
     mask = (time >= t0) & (time < t1)
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)

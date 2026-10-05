@@ -1,6 +1,7 @@
 """HMM 行为分割：全体文件合并训练一个 HMM，逐文件解码保存。"""
 
 import pickle
+from turtle import clone
 
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
@@ -11,16 +12,28 @@ MODEL_NAME = "hmm_model.pkl"
 
 
 def fit_hmm(X, n_states, n_seeds, n_iter):
-    """多随机种子训练 HMM，返回对数似然最高的模型。"""
+    """多随机种子训练 GaussianHMM，退化 seed 自动跳过。"""
     best_model, best_score = None, -np.inf
     for seed in range(n_seeds):
         model = GaussianHMM(n_components=n_states, covariance_type="diag",
                             n_iter=n_iter, random_state=seed, verbose=False)
-        model.fit(X)
-        score = model.score(X)
+        try:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                model.fit(X)
+            if not (np.isfinite(model.startprob_).all()
+                    and np.isfinite(model.transmat_).all()
+                    and np.isfinite(model.means_).all()):
+                print(f"  seed={seed}  退化，跳过")
+                continue
+            score = model.score(X)
+        except ValueError as e:
+            print(f"  seed={seed}  失败，跳过")
+            continue
         print(f"  seed={seed}  loglik={score:.1f}")
         if score > best_score:
             best_score, best_model = score, model
+    if best_model is None:
+        raise RuntimeError(f"K={n_states} 所有 seed 均训练失败")
     print(f"最佳对数似然: {best_score:.1f}")
     return best_model
 
