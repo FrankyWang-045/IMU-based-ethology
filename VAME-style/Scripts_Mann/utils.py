@@ -31,6 +31,14 @@ def hmm_path(cfg, rec_name):
     #录制文件对应的hmm npz路径
     return output_dir(cfg) / f"{rec_name}_hmm.npz"  
 
+def hmm_cat_path(cfg, rec_name):
+    # 录制文件对应的 categorical HMM npz 路径
+    return output_dir(cfg) / f"{rec_name}_hmm_cat.npz"
+
+def hmm_hsmm_path(cfg, rec_name):
+    # 录制文件对应的 HSMM npz 路径
+    return output_dir(cfg) / f"{rec_name}_hsmm.npz"
+
 def new_experiment_dir(cfg):
     """创建 output/exp_XXX/ 实验目录，编号自动递增。"""
     out = output_dir(cfg)

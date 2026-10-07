@@ -26,8 +26,8 @@ def main():
 
     npz_files = [p for p in sorted(output_dir(cfg).glob("*.npz"))
                  if not p.stem.endswith(("_latent", "_hmm"))]
-    x_all = load_raw_x(npz_files[0])
-    x = (x_all - ckpt["x_mean"]) / ckpt["x_std"]
+
+    x = (load_raw_x(npz_files[0]) - ckpt["x_mean"]) / ckpt["x_std"]
 
     mid = len(x) // 2
     seg = torch.from_numpy(x[mid:mid + 2000].astype(np.float32))

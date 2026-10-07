@@ -99,7 +99,6 @@ class PoseVAE(nn.Module):
         return x_recon, mu, logvar
 
 
-
 #损失函数
 
 def reconstruction_loss(x_recon, x):

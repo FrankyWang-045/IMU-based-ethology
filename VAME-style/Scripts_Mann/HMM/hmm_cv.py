@@ -6,7 +6,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from hmm_segment import fit_hmm
+from Scripts_Mann.hmm_segment import fit_hmm
 from utils import load_config, output_dir
 
 N_FOLDS = 5          # 时间块折数

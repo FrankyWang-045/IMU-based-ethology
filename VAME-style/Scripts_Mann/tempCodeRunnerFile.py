@@ -1,2 +1,1 @@
-
-def main():
+hmm_hsmm_path

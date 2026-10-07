@@ -5,13 +5,14 @@ import torch
 from torch.utils.data import Dataset
 
 
+
 def load_raw_x(npz_path):
-    """从预处理 npz 提取未标准化的 VAE 输入 (N, 5)。"""
+    """VAE 输入 (N, 5): trig4 + wz。"""
     data = np.load(npz_path)
     feats = data["features"]
-    trig = feats[:, 9:13]      # sin/cos 四轴
-    wz = feats[:, 5:6]         # gyro z
-    return np.hstack([trig, wz])
+    trig = feats[:, 9:13]
+    wz = feats[:, 5:6]
+    return np.hstack([trig, wz])                              # (N, 5)
 
 
 def compute_stats(npz_paths):
