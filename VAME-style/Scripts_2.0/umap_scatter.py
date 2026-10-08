@@ -1,4 +1,4 @@
-﻿"""Latent UMAP 降维 + HMM 状态着色。"""
+﻿"""Latent UMAP 降维 + 状态着色。"""
 
 import sys
 
@@ -21,20 +21,34 @@ def _check_array_compat(*args, **kwargs):
 
 _umap_mod.check_array = _check_array_compat
 
-from utils import load_config, output_dir, latent_path, hmm_path
+from utils import load_config, output_dir, latent_path, hmm_path, hmm_hsmm_path
 
 N_SAMPLES = 20000
+METHOD = "hsmm"  # 可选：hmm / categorical / hsmm
+
+
+def hmm_file_path(cfg, rec, method):
+    if method == "categorical":
+        from utils import hmm_cat_path
+        return hmm_cat_path(cfg, rec)
+    elif method == "hsmm":
+        return hmm_hsmm_path(cfg, rec)
+    return hmm_path(cfg, rec)
 
 
 def main():
     cfg = load_config()
     out = output_dir(cfg)
-    rec = sys.argv[1] if len(sys.argv) > 1 else None
+
+    method = sys.argv[1] if len(sys.argv) > 1 else METHOD
+    rec = sys.argv[2] if len(sys.argv) > 2 else None
+
     if rec is None:
-        rec = sorted(out.glob("*_hmm.npz"))[0].stem.replace("_hmm", "")
+        suffix = {"categorical": "_hmm_cat", "hsmm": "_hsmm"}.get(method, "_hmm")
+        rec = sorted(out.glob(f"*{suffix}.npz"))[0].stem.replace(suffix, "")
 
     z = np.load(latent_path(cfg, rec))["downstream"]
-    states = np.load(hmm_path(cfg, rec))["states"]
+    states = np.load(hmm_file_path(cfg, rec, method))["states"]
 
     rng = np.random.default_rng(0)
     idx = rng.choice(len(z), size=min(N_SAMPLES, len(z)), replace=False)
@@ -49,10 +63,11 @@ def main():
         ax.scatter(embedding[m, 0], embedding[m, 1],
                    s=2, alpha=0.5, label=f"state {s}")
     ax.legend(markerscale=5, loc="upper right")
-    ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
-    ax.set_title(f"{rec} latent space")
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    ax.set_title(f"{rec} latent space ({method})")
     fig.tight_layout()
-    fig.savefig(out / f"{rec}_umap.png", dpi=150)
+    fig.savefig(out / f"{rec}_{method}_umap.png", dpi=150)
     plt.show()
 
 

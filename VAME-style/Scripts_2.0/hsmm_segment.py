@@ -119,18 +119,8 @@ class HSMM:
         # 归一化
         return log_P - logsumexp(log_P, axis=1, keepdims=True)
 
-    def _segment_loglik(self, X):
-        T = len(X)
-        log_B = self.emission.log_prob(X)
-        prefix = np.concatenate([np.zeros((1, self.n_states)), np.cumsum(log_B, axis=0)], axis=0)
-        max_d = min(self.d_max, T)
-        seg_loglik = np.full((T, max_d, self.n_states), -np.inf)
-        for d in range(1, max_d + 1):
-            seg_loglik[: T - d + 1, d - 1, :] = prefix[d:T + 1, :] - prefix[: T - d + 1, :]
-        return seg_loglik
-
     def viterbi(self, X, log_P=None):
-        """向量化 HSMM Viterbi，可传入解码用 log_P。"""
+        """向量化 HSMM Viterbi，实时计算 segment likelihood，低内存占用。"""
         if log_P is None:
             log_P = self.log_P
 
@@ -138,17 +128,26 @@ class HSMM:
         K = self.n_states
         D = min(self.d_max, T)
 
-        seg_loglik = self._segment_loglik(X)
-        log_P = log_P[:, :D]
-        log_A = np.log(self.A + 1e-10)
-        log_pi = np.log(self.pi + 1e-10)
+        # 发射对数概率 (T, K)，用 float32 省内存
+        log_B = self.emission.log_prob(X).astype(np.float32)
 
-        delta = np.full((T, K), -np.inf)
+        # 前缀和：prefix[t+1, i] = sum_{s=0}^{t} log_B[s, i]
+        prefix = np.concatenate(
+            [np.zeros((1, K), dtype=np.float32), np.cumsum(log_B, axis=0)],
+            axis=0,
+        )
+
+        log_P = log_P[:, :D].astype(np.float32)
+        log_A = np.log(self.A + 1e-10).astype(np.float32)
+        log_pi = np.log(self.pi + 1e-10).astype(np.float32)
+
+        delta = np.full((T, K), -np.inf, dtype=np.float32)
         back_s = np.zeros((T, K), dtype=int)
         back_d = np.zeros((T, K), dtype=int)
         back_j = np.zeros((T, K), dtype=int)
 
-        enter_val = np.full((T, K), -np.inf)
+        # enter_val[s, i] = max_j delta[s-1, j] + log_A[j, i]
+        enter_val = np.full((T, K), -np.inf, dtype=np.float32)
         enter_j = np.full((T, K), -1, dtype=int)
         enter_val[0, :] = log_pi
 
@@ -158,15 +157,18 @@ class HSMM:
                 enter_val[t, :] = candidate.max(axis=1)
                 enter_j[t, :] = candidate.argmax(axis=1)
 
+            # 有效时长 d = 1..min(D, t+1)
             d_max_t = min(D, t + 1)
             ds = np.arange(1, d_max_t + 1)
             ss = t - ds + 1
 
-            enter_val_ss = enter_val[ss, :]
-            log_P_ds = log_P[:, ds - 1].T
-            seg_loglik_ss = seg_loglik[ss, ds - 1, :]
+            enter_val_ss = enter_val[ss, :]            # (d_max_t, K)
+            log_P_ds = log_P[:, ds - 1].T              # (d_max_t, K)
 
-            vals = enter_val_ss + log_P_ds + seg_loglik_ss
+            # 实时计算 segment log-likelihood，不存 (T, D, K) 大数组
+            seg_loglik_ss = prefix[ss + ds, :] - prefix[ss, :]
+
+            vals = enter_val_ss + log_P_ds + seg_loglik_ss  # (d_max_t, K)
 
             best_d_idx = np.argmax(vals, axis=0)
             delta[t, :] = vals[best_d_idx, np.arange(K)]
@@ -174,6 +176,7 @@ class HSMM:
             back_s[t, :] = ss[best_d_idx]
             back_j[t, :] = enter_j[ss[best_d_idx], np.arange(K)]
 
+        # 回溯
         states = np.zeros(T, dtype=int)
         last_i = np.argmax(delta[-1, :])
         t = T - 1

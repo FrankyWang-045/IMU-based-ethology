@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 '''
-输入 x: (B, T, 5)   # [sin_r, cos_r, sin_p, cos_p, wz_std]
+输入 x: (B, T, 6)   # [ax, ay, az, wx, wy, wz]
   ↓ Encoder: 因果 Conv1d 堆叠，感受野 ~25 帧（0.25s）
 h: (B, T, hidden)   # 逐帧，第 t 帧只看过 x[:, t-24:t+1]
   ↓ Lambda: 逐帧 Linear → mu (B,T,z), logvar (B,T,z)
@@ -84,7 +84,7 @@ class Decoder(nn.Module):
     
 # 模型训练全程封装
 class PoseVAE(nn.Module):
-    def __init__(self, in_features=5, z_dim=6):
+    def __init__(self, in_features=6, z_dim=6):
         super().__init__()
 
         self.encoder = Encoder(in_features=in_features)

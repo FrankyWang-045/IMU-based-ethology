@@ -42,8 +42,8 @@ def main():
 
     # 参数：文件、时间窗口
     rec = sys.argv[1] if len(sys.argv) > 1 else None
-    t0 = float(sys.argv[2]) if len(sys.argv) > 2 else 600
-    t1 = t0 + (float(sys.argv[3]) if len(sys.argv) > 3 else 20)
+    t0 = float(sys.argv[2]) if len(sys.argv) > 2 else 720
+    t1 = t0 + (float(sys.argv[3]) if len(sys.argv) > 3 else 10)
 
     if rec is None:
         rec = sorted(out.glob("*_hmm.npz"))[0].stem.replace("_hmm", "")

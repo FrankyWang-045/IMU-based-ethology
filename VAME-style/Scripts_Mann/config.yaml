@@ -3,43 +3,42 @@
 project:
   name: imu_pose_vae
   raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\Test              # 原始 csv 文件夹
-  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\latents            # 所有产物的根目录
+  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\smalltest             # 所有产物的根目录
 
 preprocess:
   lowpass_cutoff: 12.5   # 25 Hz 奈奎斯特
   lowpass_order: 4
   target_fs: 25
 
-
 dataset:
-  chunk: 500                    # 训练块长（帧）
+  chunk: 500                     # 训练块长（帧）
   val_files: []                   # 按文件划分验证集：填文件名（不含扩展名）
                                   # 例: ["A6_C3_C3-c2"]；空列表 = 全部用于训练
 
 model:
-  in_features: 6
+  in_features: 5
   z_dim: 6
   channels: [32, 64, 64]
-  kernel_size: 9           # 感受野 = 1 + 3×(9-1) = 25 帧
+  kernel_size: 9                  # 感受野 = 1 + 3×(9-1) = 25 帧
 
 train:
   batch_size: 32
-  epochs: 200
+  epochs: 150
   lr: 0.001
   kl_beta: 0.1
   seed: 0
 
 hmm:
-  n_states: 14
+  n_states: 15
   n_seeds: 1
-  n_iter: 200
+  n_iter: 100
   covariance_type: diag
   n_symbols: 128
   sticky_strength: 10.0   # 自转移先验强度，越大状态越“粘”
   min_duration_frames: 10
-  hsmm_sticky_beta: 0.001
+  hsmm_sticky_beta: 0.005
   
 hmm_scan:
-  k_list: [10,11,12,13,14,15,16,17,18,19]
+  k_list: [3, 5, 7, 9, 11, 13, 15, 20, 25, 30]
   n_seeds: 2
   sample_frames: 40000
