@@ -2,110 +2,178 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-'''
-输入 x: (B, T, 6)   # [ax, ay, az, wx, wy, wz]
-  ↓ Encoder: 因果 Conv1d 堆叠，感受野 ~25 帧（0.25s）
-h: (B, T, hidden)   # 逐帧，第 t 帧只看过 x[:, t-24:t+1]
-  ↓ Lambda: 逐帧 Linear → mu (B,T,z), logvar (B,T,z)
-  ↓ 重参数化: z = mu + σ·ε
-  ↓ Decoder: 逐帧 MLP
-x̂: (B, T, 5)        # 用 z_t 重构当前帧
-损失 = MSE(x, x̂) + β·KL(mu, logvar)   # 都是逐帧求平均
 
-'''
+class CausalConv1d(nn.Module):
+    """因果 1D 卷积：只在时间轴左侧补 pad，不看未来帧。"""
 
-#1d因果卷积算法
-class CausalConv1d(nn.Module): 
-    def __init__(self, in_ch, out_ch, kernel_size): 
+    def __init__(self, in_ch, out_ch, kernel_size, dilation=1, pad_mode="replicate"):
         super().__init__()
-        self.pad = kernel_size - 1
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size) #定义感受野为每帧侧
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, dilation=dilation)
+        self.pad_mode = pad_mode
 
     def forward(self, x):
-        x = F.pad(x, (self.pad, 0))  # 在时间维度前面填充 pad 个 0
+        x = F.pad(x, (self.pad, 0), mode=self.pad_mode)
         return self.conv(x)
 
-#因果卷积编码器
-class Encoder(nn.Module):
 
-    def __init__(self, in_features=5, channels=(32, 64, 64), kernel_size=9):
-        
-        #通道数5、卷积核大小9；三层网络（32，64，64）
+class CausalBranchEncoder(nn.Module):
+    """一个分支的因果编码器，输出逐帧 mu/logvar。"""
+
+    def __init__(self, in_features, channels, kernel_sizes, z_dim, pad_mode="replicate"):
         super().__init__()
-        dims = [in_features, *channels]
-        self.convs = nn.ModuleList()  #在Encoder类中创建一个ModuleList，用于存储卷积层，在forward中反复调用。
-        self.receptive_field = 1 + len(channels) * (kernel_size - 1)    #显式保存感受野大小：感受野 = 通道数 ×（卷积核大小-1） + 1
-        for i in range(len(dims) - 1):
-            self.convs.append(CausalConv1d(dims[i], dims[i + 1], kernel_size))
+        assert len(channels) == len(kernel_sizes)
+        dims = [in_features] + list(channels)
+        self.convs = nn.ModuleList()
+        for i, k in enumerate(kernel_sizes):
+            self.convs.append(
+                CausalConv1d(dims[i], dims[i + 1], k, pad_mode=pad_mode)
+            )
+        self.receptive_field = 1 + sum(k - 1 for k in kernel_sizes)
+        self.to_mu = nn.Linear(channels[-1], z_dim)
+        self.to_logvar = nn.Linear(channels[-1], z_dim)
 
     def forward(self, x):
-        # x: (B, T, 5)  ← 注意 Conv1d 要 (B, C, T)，需要 transpose
-
-        x = x.transpose(1, 2)  # (B, 5, T)
+        h = x.transpose(1, 2)
         for conv in self.convs:
-            x = F.relu(conv(x))  #卷积层外套ReLU激活函数
+            h = F.relu(conv(h))
+        h = h.transpose(1, 2)
+        mu = self.to_mu(h)
+        logvar = self.to_logvar(h)
+        return mu, logvar
 
-        return x.transpose(1, 2) #重新转置回来
 
+class PerFrameDecoder(nn.Module):
+    """逐帧 MLP 解码器：z (B,T,Z) -> out (B,T,C)。"""
 
-
-class Lambda(nn.Module):
-    """逐帧计算潜变量分布参数并采样。"""
-
-    def __init__(self, hidden_size=64, z_dim=6):
+    def __init__(self, z_dim, out_features, hidden=(64, 128)):
         super().__init__()
-
-        self.hidden_to_mean = nn.Linear(hidden_size, z_dim)
-        self.hidden_to_logvar = nn.Linear(hidden_size, z_dim)
-
-    
-    def forward(self, h):
-        # h: (B, T, hidden_size)
-        mu = self.hidden_to_mean(h)        
-        logvar = self.hidden_to_logvar(h)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z, mu, logvar
-
-class Decoder(nn.Module):
-
-    def __init__(self, z_dim=6, out_features=5):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(z_dim,64),
-            nn.ReLU(),
-            nn.Linear(64, out_features)
-        )
+        layers = []
+        prev = z_dim
+        for h in hidden:
+            layers += [nn.Linear(prev, h), nn.ReLU()]
+            prev = h
+        layers.append(nn.Linear(prev, out_features))
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, z):
-        # z: (B, T, z_dim)
-        return self.mlp(z)  # (B, T, out_features)
-    
-# 模型训练全程封装
+        return self.mlp(z)
+
+
 class PoseVAE(nn.Module):
-    def __init__(self, in_features=6, z_dim=6):
+    """
+    2 分支频率分解因果 VAE。
+    latent 顺序固定为 branch_configs 里的顺序，例如 [slow, fast]。
+    """
+
+    def __init__(
+        self,
+        in_features=6,
+        z_dim=9,
+        branch_configs=None,
+        decoder_hidden=(64, 128),
+        pad_mode="replicate",
+    ):
         super().__init__()
+        if branch_configs is None:
+            branch_configs = [
+                {
+                    "name": "slow",
+                    "z_dim": 3,
+                    "channels": [32, 64, 64, 64],
+                    "kernel_sizes": [33, 33, 33, 32],
+                },
+                {
+                    "name": "fast",
+                    "z_dim": 6,
+                    "channels": [32, 64, 64],
+                    "kernel_sizes": [5, 5, 6],
+                },
+            ]
 
-        self.encoder = Encoder(in_features=in_features)
-        self.lmbda = Lambda(hidden_size=64, z_dim=z_dim)
-        self.decoder = Decoder(z_dim=z_dim, out_features=in_features)
-        self.receptive_field = self.encoder.receptive_field
-        
-    def forward(self, x):
-        h = self.encoder(x)
-        z, mu, logvar = self.lmbda(h)
-        x_recon = self.decoder(z)
-        return x_recon, mu, logvar
+        self.branch_order = [b["name"] for b in branch_configs]
+        self.branch_configs = branch_configs
+        self.pad_mode = pad_mode
 
+        # 编码器
+        self.encoders = nn.ModuleDict()
+        total_z = 0
+        for cfg in branch_configs:
+            self.encoders[cfg["name"]] = CausalBranchEncoder(
+                in_features=in_features,
+                channels=cfg["channels"],
+                kernel_sizes=cfg["kernel_sizes"],
+                z_dim=cfg["z_dim"],
+                pad_mode=pad_mode,
+            )
+            total_z += cfg["z_dim"]
 
+        assert total_z == z_dim, f"分支 z_dim 之和 {total_z} != 总 z_dim {z_dim}"
 
-#损失函数
+        # 解码器：每个分支一个
+        self.decoders = nn.ModuleDict()
+        for cfg in branch_configs:
+            self.decoders[cfg["name"]] = PerFrameDecoder(
+                z_dim=cfg["z_dim"],
+                out_features=in_features,
+                hidden=decoder_hidden,
+            )
 
-def reconstruction_loss(x_recon, x):
-    recon_loss = F.mse_loss(x_recon, x)
-    return recon_loss
+        self.receptive_field = max(
+            self.encoders[name].receptive_field for name in self.branch_order
+        )
+
+    def encode(self, x, sample=True):
+        mus, logvars, zs = [], [], []
+        for name in self.branch_order:
+            mu, logvar = self.encoders[name](x)
+            mus.append(mu)
+            logvars.append(logvar)
+            if sample:
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn_like(std)
+                zs.append(mu + eps * std)
+            else:
+                zs.append(mu)
+        mu = torch.cat(mus, dim=-1)
+        logvar = torch.cat(logvars, dim=-1)
+        z = torch.cat(zs, dim=-1)
+        return z, mu, logvar
+
+    def decode(self, z):
+        """
+        z: (B, T, z_dim)
+        返回 dict:
+            slow / fast : (B, T, 6)  各分支重建
+            recon       : (B, T, 6)  相加后的总重建
+        """
+        recon = {}
+        start = 0
+        for cfg in self.branch_configs:
+            name = cfg["name"]
+            z_dim = cfg["z_dim"]
+            z_b = z[..., start : start + z_dim]
+            recon[name] = self.decoders[name](z_b)
+            start += z_dim
+
+        # 总重建 = 各分支相加
+        recon["recon"] = sum(recon[name] for name in self.branch_order)
+        return recon
+
+    def forward(self, x, sample=True):
+        z, mu, logvar = self.encode(x, sample=sample)
+        out = self.decode(z)
+        return out["recon"], mu, logvar
+
+    def forward_branches(self, x, sample=True):
+        z, mu, logvar = self.encode(x, sample=sample)
+        recon_dict = self.decode(z)
+        return recon_dict, mu, logvar
+
 
 def kl_loss(mu, logvar):
-    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - torch.exp(logvar))
-    return kl
+    return -0.5 * torch.mean(1 + logvar - mu.pow(2) - torch.exp(logvar))
+
+
+def reconstruction_loss(pred, target):
+    return F.mse_loss(pred, target)

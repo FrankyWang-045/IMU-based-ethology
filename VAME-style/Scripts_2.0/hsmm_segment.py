@@ -1,11 +1,8 @@
 """自研 HSMM 行为分割，带最短时长约束与 sticky 时长加权解码。
 
-- 观测：VAE latent z（6 维连续）
-- 发射：高斯分布（diag 协方差）
-- 时长：Negative Binomial，默认初始化偏向长时长
-- 最大时长 D_max 默认 500 帧（5 s @ 100 Hz）
-- 最短时长：MIN_DURATION_FRAMES 帧（默认 10 帧 = 0.1 s）
-- 解码：P(d) = 0 for d < MIN_DURATION_FRAMES，再叠加 sticky boost
+支持两种训练模式：
+1) 单段训练（旧）：把所有 latent 拼起来随机切一段训练；
+2) 分段并行训练（新）：每轮随机抽多个独立片段，分别 E-step 后聚合统计量。
 """
 
 import pickle
@@ -16,17 +13,12 @@ import numpy as np
 from scipy.special import gammaln, logsumexp
 from sklearn.cluster import KMeans
 
-from utils import load_config, output_dir
+from utils import load_config, output_dir, latest_experiment_dir
 
 MODEL_NAME = "hsmm_model.pkl"
-D_MAX = 500
-TRAIN_FRAMES = 10000
-MIN_DURATION_FRAMES = 10   # 0.1 s @ 100 Hz
-STICKY_BETA = 0.0          # 额外 sticky boost，0 表示禁用
 
 
 def log_nb_pmf(d, r, p):
-    """负二项分布的对数 PMF，d 为帧数（从 1 开始），k = d-1。"""
     k = d - 1
     return (
         gammaln(k + r)
@@ -39,7 +31,6 @@ def log_nb_pmf(d, r, p):
 
 class NegativeBinomialDuration:
     def __init__(self, r=20.0, p=0.2):
-        # 默认偏向长时长：均值 = r(1-p)/p ≈ 80 帧（0.8 s）
         self.r = float(r)
         self.p = float(p)
 
@@ -89,7 +80,7 @@ class GaussianDiagEmission:
 
 
 class HSMM:
-    def __init__(self, n_states, n_dims, d_max=D_MAX):
+    def __init__(self, n_states, n_dims, d_max):
         self.n_states = n_states
         self.n_dims = n_dims
         self.d_max = d_max
@@ -103,24 +94,19 @@ class HSMM:
     def _compute_log_P(self):
         return np.stack([d.log_pmf(self.d_max) for d in self.duration], axis=0)
 
-    def get_decode_log_P(self, beta=STICKY_BETA, min_d=MIN_DURATION_FRAMES):
-        """构造解码用时长分布：sticky boost + 最短时长约束。"""
+    def get_decode_log_P(self, beta, min_d):
         d = np.arange(1, self.d_max + 1)
         log_P = self.log_P.copy()
 
-        # sticky boost
         if beta != 0.0:
             log_P = log_P + beta * d[None, :]
 
-        # 最短时长硬约束
         if min_d > 1:
             log_P[:, :min_d] = -np.inf
 
-        # 归一化
         return log_P - logsumexp(log_P, axis=1, keepdims=True)
 
     def viterbi(self, X, log_P=None):
-        """向量化 HSMM Viterbi，实时计算 segment likelihood，低内存占用。"""
         if log_P is None:
             log_P = self.log_P
 
@@ -128,10 +114,7 @@ class HSMM:
         K = self.n_states
         D = min(self.d_max, T)
 
-        # 发射对数概率 (T, K)，用 float32 省内存
         log_B = self.emission.log_prob(X).astype(np.float32)
-
-        # 前缀和：prefix[t+1, i] = sum_{s=0}^{t} log_B[s, i]
         prefix = np.concatenate(
             [np.zeros((1, K), dtype=np.float32), np.cumsum(log_B, axis=0)],
             axis=0,
@@ -142,13 +125,12 @@ class HSMM:
         log_pi = np.log(self.pi + 1e-10).astype(np.float32)
 
         delta = np.full((T, K), -np.inf, dtype=np.float32)
-        back_s = np.zeros((T, K), dtype=int)
-        back_d = np.zeros((T, K), dtype=int)
-        back_j = np.zeros((T, K), dtype=int)
+        back_s = np.zeros((T, K), dtype=np.int32)
+        back_d = np.zeros((T, K), dtype=np.int32)
+        back_j = np.zeros((T, K), dtype=np.int32)
 
-        # enter_val[s, i] = max_j delta[s-1, j] + log_A[j, i]
         enter_val = np.full((T, K), -np.inf, dtype=np.float32)
-        enter_j = np.full((T, K), -1, dtype=int)
+        enter_j = np.full((T, K), -1, dtype=np.int32)
         enter_val[0, :] = log_pi
 
         for t in range(T):
@@ -157,18 +139,15 @@ class HSMM:
                 enter_val[t, :] = candidate.max(axis=1)
                 enter_j[t, :] = candidate.argmax(axis=1)
 
-            # 有效时长 d = 1..min(D, t+1)
             d_max_t = min(D, t + 1)
             ds = np.arange(1, d_max_t + 1)
             ss = t - ds + 1
 
-            enter_val_ss = enter_val[ss, :]            # (d_max_t, K)
-            log_P_ds = log_P[:, ds - 1].T              # (d_max_t, K)
-
-            # 实时计算 segment log-likelihood，不存 (T, D, K) 大数组
+            enter_val_ss = enter_val[ss, :]
+            log_P_ds = log_P[:, ds - 1].T
             seg_loglik_ss = prefix[ss + ds, :] - prefix[ss, :]
 
-            vals = enter_val_ss + log_P_ds + seg_loglik_ss  # (d_max_t, K)
+            vals = enter_val_ss + log_P_ds + seg_loglik_ss
 
             best_d_idx = np.argmax(vals, axis=0)
             delta[t, :] = vals[best_d_idx, np.arange(K)]
@@ -176,7 +155,6 @@ class HSMM:
             back_s[t, :] = ss[best_d_idx]
             back_j[t, :] = enter_j[ss[best_d_idx], np.arange(K)]
 
-        # 回溯
         states = np.zeros(T, dtype=int)
         last_i = np.argmax(delta[-1, :])
         t = T - 1
@@ -192,13 +170,12 @@ class HSMM:
 
         return states
 
-    def fit(self, X, n_iter=20):
-        """Viterbi EM 训练，训练阶段也用最短时长约束。"""
+    def fit(self, X, n_iter=20, min_d=10):
+        """单段 Viterbi EM 训练。"""
         T = len(X)
-        print(f"HSMM 训练: T={T}, K={self.n_states}, D_max={self.d_max}, min_d={MIN_DURATION_FRAMES}")
+        print(f"HSMM 单段训练: T={T}, K={self.n_states}, D_max={self.d_max}, min_d={min_d}")
 
-        # 训练阶段也强制最短时长，让模型学得更 stable
-        train_log_P = self.get_decode_log_P(beta=0.0, min_d=MIN_DURATION_FRAMES)
+        train_log_P = self.get_decode_log_P(beta=0.0, min_d=min_d)
 
         for it in range(n_iter):
             states = self.viterbi(X, log_P=train_log_P)
@@ -238,11 +215,89 @@ class HSMM:
                     continue
                 hist = np.bincount(durations[i], minlength=self.d_max + 1)[1:]
                 self.duration[i].fit(hist, hist)
+
             self.log_P = self._compute_log_P()
-            train_log_P = self.get_decode_log_P(beta=0.0, min_d=MIN_DURATION_FRAMES)
+            train_log_P = self.get_decode_log_P(beta=0.0, min_d=min_d)
 
             avg_loglik = self.emission.log_prob(X)[np.arange(T), states].mean()
             print(f"  iter {it + 1}/{n_iter}: avg loglik={avg_loglik:.4f}, n_segments={len(segments)}")
+
+        return self
+
+    def fit_segments(self, segments, n_iter=20, min_d=10):
+        """多段并行 Viterbi EM：段间不连接，每轮聚合统计量。"""
+        n_segs = len(segments)
+        print(f"HSMM 分段训练: {n_segs} 段/轮, K={self.n_states}, D_max={self.d_max}, min_d={min_d}")
+
+        train_log_P = self.get_decode_log_P(beta=0.0, min_d=min_d)
+
+        for it in range(n_iter):
+            # 跨段聚合统计量
+            counts_init = np.zeros(self.n_states)
+            trans_counts = np.ones((self.n_states, self.n_states))
+            state_counts = np.zeros(self.n_states)
+            state_sum = np.zeros((self.n_states, self.n_dims))
+            state_sumsq = np.zeros((self.n_states, self.n_dims))
+            duration_hist = [np.zeros(self.d_max, dtype=float) for _ in range(self.n_states)]
+
+            total_loglik = 0.0
+            total_frames = 0
+
+            for X in segments:
+                states = self.viterbi(X, log_P=train_log_P)
+                T_seg = len(X)
+
+                total_loglik += self.emission.log_prob(X)[np.arange(T_seg), states].sum()
+                total_frames += T_seg
+
+                counts_init[states[0]] += 1
+
+                # emission 统计
+                for s in range(self.n_states):
+                    mask = states == s
+                    n_mask = mask.sum()
+                    if n_mask > 0:
+                        state_counts[s] += n_mask
+                        state_sum[s] += X[mask].sum(axis=0)
+                        state_sumsq[s] += (X[mask] ** 2).sum(axis=0)
+
+                # 段内转移与时长（不跨段统计转移）
+                t = 0
+                while t < T_seg:
+                    s = t
+                    state = states[t]
+                    while t < T_seg and states[t] == state:
+                        t += 1
+                    d = t - s
+                    d_idx = min(d - 1, self.d_max - 1)
+                    duration_hist[state][d_idx] += 1
+                    if t < T_seg:
+                        next_state = states[t]
+                        if state != next_state:
+                            trans_counts[state, next_state] += 1
+
+            # M-step
+            self.pi = (counts_init + 1.0) / (counts_init.sum() + self.n_states)
+
+            self.A = trans_counts / trans_counts.sum(axis=1, keepdims=True)
+            np.fill_diagonal(self.A, 0.0)
+
+            weight = state_counts[:, None] + 1e-10
+            self.emission.mean = state_sum / weight
+            self.emission.var = np.maximum(
+                state_sumsq / weight - (state_sum / weight) ** 2,
+                0.0,
+            ) + 1e-4
+
+            for i in range(self.n_states):
+                if duration_hist[i].sum() > 0:
+                    self.duration[i].fit(duration_hist[i], duration_hist[i])
+
+            self.log_P = self._compute_log_P()
+            train_log_P = self.get_decode_log_P(beta=0.0, min_d=min_d)
+
+            avg_loglik = total_loglik / total_frames
+            print(f"  iter {it + 1}/{n_iter}: avg loglik={avg_loglik:.4f}")
 
         return self
 
@@ -256,12 +311,50 @@ def sample_train_frames(X, n_frames, seed):
     return X[start : start + n_frames]
 
 
+def sample_segments(Xs, segment_length, n_segments, seed):
+    """从多个 recording 中随机抽取 n_segments 个独立片段。"""
+    rng = np.random.default_rng(seed)
+    valid_indices = [i for i, X in enumerate(Xs) if len(X) >= segment_length]
+    if not valid_indices:
+        raise ValueError(f"所有 recording 都短于 segment_length={segment_length}")
+
+    segments = []
+    for _ in range(n_segments):
+        idx = rng.choice(valid_indices)
+        X = Xs[idx]
+        start = rng.integers(0, len(X) - segment_length + 1)
+        segments.append(X[start : start + segment_length])
+    return segments
+
+
 def main():
     cfg = load_config()
     hc = cfg["hmm"]
+    fs = cfg["preprocess"]["target_fs"]
+
+    # ---------- 从 config 读取参数 ----------
+    d_max_sec = hc.get("hsmm_d_max_sec", 5.0)
+    d_max = int(d_max_sec * fs)
+
+    min_duration_frames = hc.get("min_duration_frames", int(0.1 * fs))
+    train_frames = hc.get("hsmm_train_frames", 10000)
+    sticky_beta = hc.get("hsmm_sticky_beta", 0.0)
+    n_iter = hc.get("hsmm_n_iter", 20)
+    n_init = hc.get("hsmm_n_init", 10)
+    seed = hc.get("hsmm_seed", 0)
+
+    # 分段训练参数（新增）
+    train_segments_per_round = hc.get("hsmm_train_segments_per_round", None)
+    segment_length = hc.get("hsmm_segment_length", None)
+    n_rounds = hc.get("hsmm_n_rounds", n_iter)
 
     out = output_dir(cfg)
-    latent_files = sorted(out.glob("*_latent.npz"))
+    exp_dir = (out / sys.argv[1]) if len(sys.argv) > 1 else latest_experiment_dir(cfg)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    latent_files = sorted(exp_dir.glob("*_latent.npz"))
+    if not latent_files:
+        latent_files = sorted(out.glob("*_latent.npz"))
     if not latent_files:
         raise FileNotFoundError("没有 latent 文件，请先运行 embed.py")
 
@@ -274,24 +367,35 @@ def main():
         lengths.append(len(X))
     X_all = np.concatenate(Xs, axis=0)
 
-    X_train = sample_train_frames(X_all, TRAIN_FRAMES, seed=0)
-    print(f"训练数据: {X_train.shape}")
+    # ---------- 初始化 ----------
+    if train_segments_per_round and segment_length:
+        init_X = sample_segments(Xs, segment_length, train_segments_per_round, seed=seed)
+        init_sample = np.concatenate(init_X, axis=0)
+    else:
+        init_sample = sample_train_frames(X_all, train_frames, seed=seed)
 
-    kmeans = KMeans(n_clusters=hc["n_states"], random_state=0, n_init=10)
-    labels = kmeans.fit_predict(X_train)
+    kmeans = KMeans(n_clusters=hc["n_states"], random_state=seed, n_init=n_init)
+    kmeans.fit(init_sample)
 
-    hsmm = HSMM(hc["n_states"], X_train.shape[1], d_max=D_MAX)
+    hsmm = HSMM(hc["n_states"], init_sample.shape[1], d_max=d_max)
     hsmm.emission.mean = kmeans.cluster_centers_
 
-    hsmm.fit(X_train, n_iter=20)
+    # ---------- 训练 ----------
+    if train_segments_per_round and segment_length:
+        print(f"分段训练: {train_segments_per_round} 段 x {segment_length} 帧，共 {n_rounds} 轮")
+        segments = sample_segments(Xs, segment_length, train_segments_per_round, seed=seed)
+        hsmm.fit_segments(segments, n_iter=n_rounds, min_d=min_duration_frames)
+    else:
+        print(f"单段训练: {train_frames} 帧，共 {n_iter} 轮")
+        X_train = sample_train_frames(X_all, train_frames, seed=seed)
+        hsmm.fit(X_train, n_iter=n_iter, min_d=min_duration_frames)
 
-    with open(out / MODEL_NAME, "wb") as f:
+    with open(exp_dir / MODEL_NAME, "wb") as f:
         pickle.dump(hsmm, f)
 
-    # 最终解码：最短时长 + sticky boost
-    sticky_beta = hc.get("hsmm_sticky_beta", STICKY_BETA)
-    decode_log_P = hsmm.get_decode_log_P(beta=sticky_beta, min_d=MIN_DURATION_FRAMES)
-    print(f"最终解码: min_d={MIN_DURATION_FRAMES}, sticky_beta={sticky_beta}")
+    # ---------- 解码 ----------
+    decode_log_P = hsmm.get_decode_log_P(beta=sticky_beta, min_d=min_duration_frames)
+    print(f"最终解码: min_d={min_duration_frames}, sticky_beta={sticky_beta}")
 
     for p, length in zip(latent_files, lengths):
         data = np.load(p)
@@ -300,7 +404,7 @@ def main():
         states = hsmm.viterbi(X, log_P=decode_log_P)
 
         np.savez(
-            out / f"{p.stem.replace('_latent', '')}_hsmm.npz",
+            exp_dir / f"{p.stem.replace('_latent', '')}_hsmm.npz",
             states=states,
             time=data["time"],
             interp_mask=data["interp_mask"],

@@ -1,7 +1,6 @@
-"""根据单个 HSMM 结果文件，按 state 切割单个视频。
-
-用法:
-    python cut_video_by_hsmm.py --state 3 --seg 0
+"""按最新 HSMM 结果自动切割视频。
+只有 VIDEO_PATH 和 OUT_DIR 两个默认路径硬编码；
+可通过 --video 和 --rec 覆盖。
 """
 
 import argparse
@@ -9,16 +8,14 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from utils import load_config, output_dir, hmm_hsmm_path
 
-# ---------- 硬编码路径 ----------
-VIDEO_PATH = Path(r"\\hulab.lumiani.ai\Data\WSB\Computational_Ethology\Data\8.25_social_all_paired\A1_C1_C1-1c\data2.mp4")   # 视频文件保持定死
-REC_NAME = "A1_C1_C1-1c"                          # 手动设置录制名
-OUT_DIR = Path(r"F:\IMU_computational_ethology\Data\VAME-Style-Data\2.0smalltest\video_clips")
+from utils import load_config, output_dir, latest_experiment_dir
 
-MIN_DURATION = 0.1
-PADDING = 0
-# --------------------------------
+
+# ---------- 默认路径（找不到 --video 时回退到这里）----------
+VIDEO_PATH = Path(r"\\hulab.lumiani.ai\Data\WSB\Computational_Ethology\Data\8.25_social_all_paired\A1_C1_C1-1c\data2.mp4")
+OUT_DIR = Path(r"F:\IMU_computational_ethology\Data\VAME-Style-Data\3.0smalltest\video_clips")
+# -----------------------------------------------------------
 
 
 def find_segments(time, states):
@@ -34,7 +31,15 @@ def find_segments(time, states):
     return segments
 
 
-def cut_video(video_path, hsmm_path, out_dir, min_duration=0.1, padding=0, target_state=None, target_seg=None):
+def cut_video(
+    video_path,
+    hsmm_path,
+    out_dir,
+    min_duration=0.1,
+    padding=0,
+    target_state=None,
+    target_seg=None,
+):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -50,12 +55,11 @@ def cut_video(video_path, hsmm_path, out_dir, min_duration=0.1, padding=0, targe
     hmm = np.load(hsmm_path)
     time = hmm["time"]
     states = hmm["states"]
-
     segments = find_segments(time, states)
 
     print(f"视频: {video_path}")
     print(f"HSMM: {hsmm_path}")
-    print(f"FPS={fps}, 总帧数={total_frames}, HSMM 片段数={len(segments)}")
+    print(f"FPS={fps:.2f}, 总帧数={total_frames}, 片段数={len(segments)}")
 
     seg_counter = {}
     cut_count = 0
@@ -102,19 +106,48 @@ def cut_video(video_path, hsmm_path, out_dir, min_duration=0.1, padding=0, targe
 
 def main():
     cfg = load_config()
-    HSMM_PATH = hmm_hsmm_path(cfg, REC_NAME)
+    out = output_dir(cfg)
 
     parser = argparse.ArgumentParser(description="按 HSMM state 切割视频")
-    parser.add_argument("--state", type=int, default=None, help="只切割指定 state")
-    parser.add_argument("--seg", type=int, default=None, help="只切割指定 state 的第 seg 个片段")
+    parser.add_argument("--rec", type=str, default=None,
+                        help="指定 recording 名，如 A1_C1_C1-1c")
+    parser.add_argument("--video", type=str, default=None,
+                        help="指定视频路径；未指定则使用代码里的 VIDEO_PATH")
+    parser.add_argument("--state", type=int, default=None,
+                        help="只切割指定 state")
+    parser.add_argument("--seg", type=int, default=None,
+                        help="只切割指定 state 的第 seg 个片段")
+    parser.add_argument("--min_duration", type=float, default=0.1,
+                        help="最短片段时长（秒）")
+    parser.add_argument("--padding", type=float, default=0,
+                        help="片段前后扩展（秒）")
     args = parser.parse_args()
 
+    exp_dir = latest_experiment_dir(cfg)
+    print(f"使用实验目录: {exp_dir}")
+
+    # 按 --rec 过滤，未指定则取第一个
+    hsmm_files = sorted(exp_dir.glob("*_hsmm.npz"))
+    if args.rec:
+        hsmm_files = [p for p in hsmm_files if p.stem.replace("_hsmm", "") == args.rec]
+
+    if not hsmm_files:
+        raise FileNotFoundError(
+            f"{exp_dir} 中没有匹配的 *_hsmm.npz"
+            + (f" (rec={args.rec})" if args.rec else "")
+        )
+
+    hsmm_path = hsmm_files[0]
+    rec_name = hsmm_path.stem.replace("_hsmm", "")
+
+    video_path = Path(args.video) if args.video else VIDEO_PATH
+
     cut_video(
-        video_path=VIDEO_PATH,
-        hsmm_path=HSMM_PATH,
-        out_dir=OUT_DIR / REC_NAME,
-        min_duration=MIN_DURATION,
-        padding=PADDING,
+        video_path=video_path,
+        hsmm_path=hsmm_path,
+        out_dir=OUT_DIR / rec_name,
+        min_duration=args.min_duration,
+        padding=args.padding,
         target_state=args.state,
         target_seg=args.seg,
     )
