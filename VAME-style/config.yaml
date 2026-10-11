@@ -2,7 +2,7 @@
 project:
   name: imu_pose_vae
   raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\Test              # 原始 csv 文件夹
-  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\Batch1           # 所有产物的根目录
+  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\Batch2           # 所有产物的根目录
 
 preprocess:
   lowpass_cutoff: 12.5
@@ -11,6 +11,8 @@ preprocess:
   flip_xz_recordings:
     - "A4_C4_C4-c8"
     - "A5_C5_C5-c8"
+  per_device_zscore: true   # 是否按设备做 z-score
+  zscore_eps: 1.0e-8          # 防止除零
 
 dataset:
   chunk: 2048
@@ -42,7 +44,7 @@ train:
   grad_clip: 1.0
 
 hmm:
-  n_states: 38
+  n_states: 60
   hsmm_sticky_beta: 0.0001
   min_duration_frames: 10
   hsmm_d_max_sec: 20
@@ -57,7 +59,7 @@ hmm:
   hsmm_n_rounds: 30                   # 共 30 轮
 
 hmm_scan:
-  k_list: [65,66,67,68,69,70,71,72,73,74,75]
+  k_list: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
   hsmm_scan_n_iter: 10
   hsmm_scan_segment_length: 5000
   hsmm_scan_n_segments: 15
