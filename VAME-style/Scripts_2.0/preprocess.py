@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.signal import butter, filtfilt
+from scipy.spatial.transform import Rotation as R
 
 from data import Data
 from utils import ROOT, load_config, output_dir
@@ -27,7 +28,8 @@ def extract_device_id(rec_name):
 
 
 class DataPreprocess(Data):
-    """IMU 预处理：对 raw 6 轴做低通滤波、降采样，并可选 per-device z-score。"""
+    """IMU 预处理：对 raw 6 轴做可选 Madgwick 重力对齐、低通滤波、降采样，
+    并可做 per-device z-score。"""
 
     def __init__(
         self,
@@ -47,6 +49,75 @@ class DataPreprocess(Data):
         self.flip_xz = set(flip_xz or [])
         self.device_stats = device_stats
         self.quiet = quiet
+
+        # Madgwick 相关配置
+        self.use_madgwick = preprocess_cfg.get("use_madgwick", False)
+        self.madgwick_beta = preprocess_cfg.get("madgwick_beta", 0.1)
+        self.save_orientation = preprocess_cfg.get("save_orientation", False)
+        self.quaternions = None
+
+    @staticmethod
+    def _madgwick_step(q, g, a, dt, beta):
+        """单步 Madgwick 更新。
+        q: 当前四元数 [w, x, y, z]
+        g: 角速度 (rad/s), shape (3,)
+        a: 加速度, shape (3,)
+        """
+        norm_a = np.linalg.norm(a)
+        if norm_a == 0.0:
+            return q
+        ax_, ay_, az_ = a / norm_a
+        qw, qx, qy, qz = q
+
+        # 陀螺仪积分
+        q_dot_gyro = 0.5 * np.array([
+            -qx * g[0] - qy * g[1] - qz * g[2],
+            qw * g[0] + qy * g[2] - qz * g[1],
+            qw * g[1] - qx * g[2] + qz * g[0],
+            qw * g[2] + qx * g[1] - qy * g[0],
+        ])
+
+        # 梯度下降修正
+        f = np.array([
+            2 * (qx * qz - qw * qy) - ax_,
+            2 * (qw * qx + qy * qz) - ay_,
+            2 * (0.5 - qx * qx - qy * qy) - az_,
+        ])
+        J = np.array([
+            [-2 * qy,  2 * qz, -2 * qw, 2 * qx],
+            [ 2 * qx,  2 * qw,  2 * qz, 2 * qy],
+            [ 0.0,    -4 * qx, -4 * qy, 0.0   ],
+        ])
+        step = J.T @ f
+        step_norm = np.linalg.norm(step)
+        if step_norm > 0:
+            step /= step_norm
+
+        q_new = q + (q_dot_gyro - beta * step) * dt
+        return q_new / np.linalg.norm(q_new)
+
+    def _estimate_orientation(self, acc, gyro, time):
+        """用 Madgwick 逐帧估计传感器到重力坐标系的姿态四元数。"""
+        gyro_rad = np.deg2rad(gyro)
+        n = len(time)
+        q = np.empty((n, 4))
+        q[0] = np.array([1.0, 0.0, 0.0, 0.0])
+
+        dt = np.diff(time)
+        for i in range(1, n):
+            q[i] = self._madgwick_step(
+                q[i - 1], gyro_rad[i], acc[i], dt[i - 1], self.madgwick_beta
+            )
+        return q
+
+    def _gravity_align(self, acc, gyro, time):
+        """把 acc 和 gyro 旋转到重力坐标系，返回对齐后的 (acc, gyro, q)。"""
+        q = self._estimate_orientation(acc, gyro, time)
+        # q 的格式是 [w,x,y,z]，scipy 需要 [x,y,z,w]
+        rot = R.from_quat(q[:, [1, 2, 3, 0]]).inv()
+        acc_w = rot.apply(acc)
+        gyro_w = rot.apply(gyro)
+        return acc_w, gyro_w, q
 
     def preprocess(self):
         raw_6axis = np.hstack([self.acc, self.gyro])
@@ -83,6 +154,20 @@ class DataPreprocess(Data):
         self.interp_mask = self.interp_mask[keep]
         # -------------------------------------------------------------
 
+        acc = raw_6axis[:, :3]
+        gyro = raw_6axis[:, 3:]
+
+        # ---------- Madgwick 重力对齐：放在滤波和降采样之前 ----------
+        if self.use_madgwick:
+            if not self.quiet:
+                print(f"  [Madgwick align] {self.name}")
+            acc, gyro, q = self._gravity_align(acc, gyro, self.time)
+            if self.save_orientation:
+                self.quaternions = q
+
+        raw_6axis = np.hstack([acc, gyro])
+        # -------------------------------------------------------------
+
         dt = np.median(np.diff(self.time))
         fs_orig = 1.0 / dt if dt > 0 else 100.0
         fs_target = self.cfg_preproc.get("target_fs", 25.0)
@@ -97,6 +182,8 @@ class DataPreprocess(Data):
             self.features = filtered[::factor]
             self.time = self.time[::factor]
             self.interp_mask = self.interp_mask[::factor]
+            if self.quaternions is not None:
+                self.quaternions = self.quaternions[::factor]
         else:
             self.features = filtered
 
@@ -121,16 +208,22 @@ class DataPreprocess(Data):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        save_dict = {
+            "features": self.features.astype(np.float32),
+            "time": self.time,
+            "interp_mask": self.interp_mask,
+        }
+        if self.save_orientation and self.quaternions is not None:
+            save_dict["quaternions"] = self.quaternions.astype(np.float32)
+
         np.savez_compressed(
             out_dir / f"{self.name}.npz",
-            features=self.features.astype(np.float32),
-            time=self.time,
-            interp_mask=self.interp_mask,
+            **save_dict,
         )
 
 
 def _compute_device_stats(cfg):
-    """第一轮预处理：不降 z-score，累积每个设备的均值和方差。"""
+    """第一轮预处理：不做 z-score，累积每个设备的均值和方差。"""
     raw_dir = ROOT / cfg["project"]["raw_dir"]
     fc = cfg["preprocess"]
     flip_xz = fc.get("flip_xz_recordings", [])
@@ -175,6 +268,7 @@ def _compute_device_stats(cfg):
                       "count": counts[dev]}
     return stats
 
+
 def _save_device_stats(stats, out_dir):
     """把 per-device 统计量保存到 metadata 子目录，避免被 train.py 误加载。"""
     out_dir = Path(out_dir) / "metadata"
@@ -188,13 +282,13 @@ def _save_device_stats(stats, out_dir):
         devices=np.array(list(stats.keys())),
     )
 
+
 def preprocess_all(cfg):
     """批量预处理：raw_dir 下所有 csv -> output_dir 下的 npz。"""
     raw_dir = ROOT / cfg["project"]["raw_dir"]
     out = output_dir(cfg)
     fc = cfg["preprocess"]
 
-    # 需要翻转 X/Z 轴的 recording 列表
     flip_xz = fc.get("flip_xz_recordings", [])
 
     per_device_zscore = fc.get("per_device_zscore", False)
@@ -218,7 +312,7 @@ def preprocess_all(cfg):
 
         # 启用 z-score 时强制重新生成（预处理配置已变化）
         if out_path.exists() and not per_device_zscore:
-            print(f"跳过（已存在）: {csv_path.stem}")
+            print(f"跳过（已存在） {csv_path.stem}")
             continue
 
         print(f"处理中: {csv_path.name}")
@@ -233,7 +327,7 @@ def preprocess_all(cfg):
         proc.preprocess()
 
         if proc.features is None or len(proc.features) == 0:
-            print(f"  跳过（无有效数据）: {csv_path.stem}")
+            print(f"  跳过（无有效数据） {csv_path.stem}")
             continue
 
         proc.save(out)

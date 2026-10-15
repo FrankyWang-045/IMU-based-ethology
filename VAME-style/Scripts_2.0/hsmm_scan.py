@@ -39,7 +39,7 @@ def fit_hsmm_segments(segments, n_states, d_max, seed=0, n_iter=5, n_init=5):
 
     hsmm = HSMM(n_states, init_sample.shape[1], d_max=d_max)
     hsmm.emission.mean = kmeans.cluster_centers_
-    hsmm.fit_segments(segments, n_iter=n_iter, min_d=10)
+    hsmm.fit_segments(segments, n_iter=n_iter, min_d=5)
     return hsmm
 
 

@@ -1,0 +1,6 @@
+state_id,primitive_name,action,merge_to_state,notes
+0,head_up,keep,,
+1,turn_left,keep,,
+2,head_up,merge,0,
+3,,delete,,过渡
+4,fast_step,keep,,

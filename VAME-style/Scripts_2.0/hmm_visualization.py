@@ -27,13 +27,13 @@ def main():
         exp_dir = out / arg1
         rec = sys.argv[2] if len(sys.argv) > 2 else None
         t0 = float(sys.argv[3]) if len(sys.argv) > 3 else 610
-        t1 = t0 + (float(sys.argv[4]) if len(sys.argv) > 4 else 20)
+        t1 = t0 + (float(sys.argv[4]) if len(sys.argv) > 4 else 10)
     else:
         # 用法 2: python hmm_visualization.py [rec] [t0] [window]
         exp_dir = latest_experiment_dir(cfg)
         rec = arg1
         t0 = float(sys.argv[2]) if len(sys.argv) > 2 else 610
-        t1 = t0 + (float(sys.argv[3]) if len(sys.argv) > 3 else 20)
+        t1 = t0 + (float(sys.argv[3]) if len(sys.argv) > 3 else 10)
 
     if rec is None:
         rec = sorted(exp_dir.glob("*_hsmm.npz"))[0].stem.replace("_hsmm", "")

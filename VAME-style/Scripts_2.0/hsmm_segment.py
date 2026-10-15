@@ -8,7 +8,7 @@
 import pickle
 import sys
 from pathlib import Path
-
+import argparse
 import numpy as np
 from scipy.special import gammaln, logsumexp
 from sklearn.cluster import KMeans
@@ -327,7 +327,7 @@ def sample_segments(Xs, segment_length, n_segments, seed):
     return segments
 
 
-def main():
+def main(exp_dir_arg=None, rec_filter=None):
     cfg = load_config()
     hc = cfg["hmm"]
     fs = cfg["preprocess"]["target_fs"]
@@ -343,20 +343,41 @@ def main():
     n_init = hc.get("hsmm_n_init", 10)
     seed = hc.get("hsmm_seed", 0)
 
-    # 分段训练参数（新增）
+    # 分段训练参数
     train_segments_per_round = hc.get("hsmm_train_segments_per_round", None)
     segment_length = hc.get("hsmm_segment_length", None)
     n_rounds = hc.get("hsmm_n_rounds", n_iter)
 
     out = output_dir(cfg)
-    exp_dir = (out / sys.argv[1]) if len(sys.argv) > 1 else latest_experiment_dir(cfg)
+
+    # ---------- 解析 exp_dir ----------
+    if exp_dir_arg:
+        exp_dir = Path(exp_dir_arg)
+        if not exp_dir.is_absolute():
+            exp_dir = out / exp_dir
+    else:
+        exp_dir = latest_experiment_dir(cfg)
     exp_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---------- 加载 latent 文件 ----------
     latent_files = sorted(exp_dir.glob("*_latent.npz"))
     if not latent_files:
         latent_files = sorted(out.glob("*_latent.npz"))
     if not latent_files:
         raise FileNotFoundError("没有 latent 文件，请先运行 embed.py")
+
+    # ---------- 按 recording 白名单过滤 ----------
+    if rec_filter is not None:
+        rec_filter_set = set(rec_filter)
+        latent_files = [
+            p for p in latent_files
+            if p.stem.replace("_latent", "") in rec_filter_set
+        ]
+        if not latent_files:
+            raise FileNotFoundError(
+                f"白名单 {list(rec_filter_set)} 没有匹配到任何 *_latent.npz 文件"
+            )
+        print(f"仅处理指定 recording: {sorted(rec_filter_set)}")
 
     Xs = []
     lengths = []
@@ -415,6 +436,24 @@ def main():
 
     print("HSMM 训练与解码完成")
 
+def parse_rec_list(s):
+    """把逗号分隔的字符串转成 list，空则返回 None。"""
+    if not s:
+        return None
+    return [r.strip() for r in s.split(",") if r.strip()]
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="自研 HSMM 行为分割")
+    parser.add_argument(
+        "--exp", type=str, default=None,
+        help="实验目录（如 exp_032），默认使用最新 exp"
+    )
+    parser.add_argument(
+        "--recs", type=str, default=None,
+        help="逗号分隔的 recording 白名单，如 A1_C1_A1-6d,A3_C3_A3-6d；默认全量"
+    )
+    args = parser.parse_args()
+
+    rec_filter = parse_rec_list(args.recs)
+    main(exp_dir_arg=args.exp, rec_filter=rec_filter)

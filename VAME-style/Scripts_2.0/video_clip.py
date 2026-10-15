@@ -13,8 +13,8 @@ from utils import load_config, output_dir, latest_experiment_dir
 
 
 # ---------- 默认路径（找不到 --video 时回退到这里）----------
-VIDEO_PATH = Path(r"\\hulab.lumiani.ai\Data\WSB\Computational_Ethology\Data\8.25_social_all_paired\A1_C1_C1-1c\data2.mp4")
-OUT_DIR = Path(r"F:\IMU_computational_ethology\Data\VAME-Style-Data\3.0smalltest\video_clips")
+VIDEO_PATH = Path(r"\\hulab.lumiani.ai\Data\WSB\Computational_Ethology\Data\8.25_social_all_paired\A3_C3_C3_1c\data2.mp4")
+OUT_DIR = Path(r"F:\IMU_computational_ethology\Data\VAME-Style-Data\Batch3\videos")
 # -----------------------------------------------------------
 
 
