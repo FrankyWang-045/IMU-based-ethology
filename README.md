@@ -1,2 +1,8 @@
 This is a VAME-style computational ethology project based on IMU data. 
-The "VAE版本" branch is 
+
+
+This part includes a preprocess GUI and main code of VAE network
+
+The README.md is still under construction.
+
+
