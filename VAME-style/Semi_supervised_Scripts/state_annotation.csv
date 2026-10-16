@@ -1,0 +1,7 @@
+class_id,class_name,state_ids,notes
+0,locomotion,,持续移动相关
+1,rearing,5;8;31,站立/抬头
+2,grooming,2;14;22;33;41,理毛行为
+3,immobile,1;7;16;38,静止/休息
+4,transition,6;9;13;20;25;40,短片段/过渡段
+5,unclassified,4;10;11;15;18;21;23;24;26;28;29;30;32;34;35;36;37;39;42;43;45,语义不清晰或待确认
