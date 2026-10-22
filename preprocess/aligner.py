@@ -6,11 +6,15 @@ Align IMU and video timelines interactively, using the mouse-drop event
 (mouse falling into the arena) as the synchronization signal.
 Outputs the time offset t_diff.
 
+本文件属于 `preprocess_v2`：内部调用的 `imu_processor.data_preprocess`
+输出 **统一 100 Hz** 信号，但 GUI 的交互逻辑、参数与输出文件（t_diff.txt）
+与 `preprocess/`（v1）完全一致，可平替使用。
+
 Sign convention (consistent with imu_processor.data_preprocess)
 ---------------------------------------------------------------
     t_diff = IMU event time - video event time
 i.e. IMU time minus t_diff aligns with video time
-(in data_preprocess: ta = t_new_0 - t_diff)
+(in data_preprocess: ta = t_new - t_new[0] - t_diff)
 
 Usage
 -----
@@ -30,7 +34,7 @@ Usage
 
 2. Standalone / CLI (Aligner loads the IMU data itself)::
 
-       python Aligner.py <video_path> <imu_raw_dir>
+       python aligner.py <video_path> <imu_raw_dir>
 
 3. Direct instantiation with a directory::
 
@@ -62,14 +66,14 @@ Notes
   and imu_processor.py in the same directory.
 """
 
+import json
 import os
 import sys
-import json
 
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider, Button
+import numpy as np
+from matplotlib.widgets import Button, Slider
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from imu_processor import data_import, data_preprocess
@@ -83,8 +87,9 @@ VIEW_WINDOW = 30.0                  # initial width of the IMU view window (s)
 WIN_SIZE = (11.0, 6.2)              # figure size in inches (fits 1080p screens)
 VIDEO_DURATION = 120.0              # only the first N seconds of video are used
                                     # (None = full length)
-PROXY_HEIGHT = 360                  # cached frame height in px (one-time extraction
-                                    # of JPEG frames, cached next to the video)
+PROXY_HEIGHT = 360                  # cached frame height in px (one-time
+                                    # extraction of JPEG frames, cached next
+                                    # to the video)
 
 
 def _prepare_frame_cache(video_path, max_duration=VIDEO_DURATION,
@@ -201,11 +206,12 @@ class IMUVideoAligner:
                 "must be provided.")
 
         t0 = raw[0, 0]
-        raw_disp = raw[raw[:, 0] - t0 <= imu_duration + 5.0]   # small margin
-        # t_diff=0.0: keep the original IMU time base; offset is set by the GUI
-        proc = data_preprocess(raw_disp, t_diff=0.0, apply_lpf=True, lpf_fc=lpf_fc)
+        # 多取 5 s 再裁掉，避免低通滤波在显示区间两端产生边缘畸变
+        raw_disp = raw[raw[:, 0] - t0 <= imu_duration + 5.0]
+        proc = data_preprocess(raw_disp, t_diff=0.0, apply_lpf=True,
+                               lpf_fc=lpf_fc)
         proc = proc[proc[:, 0] <= imu_duration]
-        self.t_imu = proc[:, 0]                     # original IMU time axis
+        self.t_imu = proc[:, 0]                     # aligned time axis (s)
         self.acc_norm = np.linalg.norm(proc[:, 1:4], axis=1)
 
         # ---------------- alignment state ----------------
@@ -269,7 +275,7 @@ class IMUVideoAligner:
         # frame step buttons
         labels = ["-100", "-10", "-1", "Play/Pause", "+1", "+10", "+100"]
         steps = [-100, -10, -1, None, 1, 10, 100]
-        self._step_btns = []
+        self._btns = []
         for i, (lab, st) in enumerate(zip(labels, steps)):
             ax_b = self.fig.add_axes([0.06 + i * 0.075, 0.15, 0.07, 0.045])
             b = Button(ax_b, lab)
@@ -277,19 +283,18 @@ class IMUVideoAligner:
                 b.on_clicked(self._toggle_play)
             else:
                 b.on_clicked(lambda e, s=st: self._step_frame(s))
-            self._step_btns.append(b)
+            self._btns.append(b)
 
         # operation buttons
         ops = [("1. Mark video event", self._mark_video),
                ("2. Mark IMU event", self._arm_mark_imu),
                ("Reset", self._reset),
                ("Save t_diff", self._save)]
-        self._op_btns = []
         for i, (lab, fn) in enumerate(ops):
             ax_b = self.fig.add_axes([0.60 + i * 0.095, 0.15, 0.09, 0.045])
             b = Button(ax_b, lab)
             b.on_clicked(fn)
-            self._op_btns.append(b)
+            self._btns.append(b)
 
         # mouse / keyboard events
         self.fig.canvas.mpl_connect("button_press_event", self._on_press)
