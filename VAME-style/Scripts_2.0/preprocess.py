@@ -13,23 +13,23 @@ DROP_LAST_SECONDS = 60.0
 
 
 def lowpass_filter(data, cutoff, fs, order=4):
-    """对多变量时序数据做零相位 Butterworth 低通滤波。"""
+    """对多变量时序数据做零相移 Butterworth 低通滤波。"""
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     b, a = butter(order, normal_cutoff, btype="low", analog=False)
     return filtfilt(b, a, data, axis=0)
 
 
-def extract_device_id(rec_name):
-    """从 recording 名中提取设备 ID，例如 A1_C1_A1-6d -> 6d。"""
-    if "-" in rec_name:
-        return rec_name.rsplit("-", 1)[-1]
-    return "unknown"
-
-
 class DataPreprocess(Data):
-    """IMU 预处理：对 raw 6 轴做可选 Madgwick 重力对齐、低通滤波、降采样，
-    并可做 per-device z-score。"""
+    """IMU 预处理：
+    1. 读取 RAW
+    2. 可选 flip_xz
+    3. 删除前后 90s/60s
+    4. 静态安装角标定：找静止段，估计重力方向，整体旋转到世界坐标系
+    5. 低通滤波
+    6. 降采样
+    7. 保存 features（物理单位，未归一化）
+    """
 
     def __init__(
         self,
@@ -38,7 +38,6 @@ class DataPreprocess(Data):
         cutoff=25.0,
         order=4,
         flip_xz=None,
-        device_stats=None,
         quiet=False,
     ):
         super().__init__(file_path)
@@ -47,77 +46,61 @@ class DataPreprocess(Data):
         self.features = None
         self.cfg_preproc = preprocess_cfg
         self.flip_xz = set(flip_xz or [])
-        self.device_stats = device_stats
         self.quiet = quiet
 
-        # Madgwick 相关配置
-        self.use_madgwick = preprocess_cfg.get("use_madgwick", False)
-        self.madgwick_beta = preprocess_cfg.get("madgwick_beta", 0.1)
-        self.save_orientation = preprocess_cfg.get("save_orientation", False)
-        self.quaternions = None
+        self.use_gravity_align = preprocess_cfg.get("use_gravity_align", True)
+        self.stationary_window_sec = preprocess_cfg.get("stationary_window_sec", 2.0)
+        self.gravity_target = np.array(
+            preprocess_cfg.get("gravity_target", [0.0, 0.0, 1.0])
+        )
 
-    @staticmethod
-    def _madgwick_step(q, g, a, dt, beta):
-        """单步 Madgwick 更新。
-        q: 当前四元数 [w, x, y, z]
-        g: 角速度 (rad/s), shape (3,)
-        a: 加速度, shape (3,)
+    def _find_stationary_window(self, acc, time):
+        """用加速度方差最小的窗口估计静止段方向。"""
+        if len(acc) == 0:
+            return 0, 0
+
+        fs = 1.0 / np.median(np.diff(time))
+        window = int(self.stationary_window_sec * fs)
+        window = max(window, 10)
+        if window >= len(acc):
+            return 0, len(acc)
+
+        step = max(1, window // 4)
+        min_var = np.inf
+        best_start = 0
+        for start in range(0, len(acc) - window + 1, step):
+            var = np.var(acc[start : start + window], axis=0).sum()
+            if var < min_var:
+                min_var = var
+                best_start = start
+        return best_start, best_start + window
+
+    def _static_gravity_alignment(self, acc, gyro, time):
+        """静态安装角标定：找静止段，计算 device->world 旋转 R0。
+
+        返回：
+            acc_w: 世界系加速度
+            gyro_w: 世界系角速度
+            R0: scipy Rotation，device -> world
+            g_dir: 估计的设备系重力方向
         """
-        norm_a = np.linalg.norm(a)
-        if norm_a == 0.0:
-            return q
-        ax_, ay_, az_ = a / norm_a
-        qw, qx, qy, qz = q
+        start, end = self._find_stationary_window(acc, time)
+        g_dir = acc[start:end].mean(axis=0)
+        g_norm = np.linalg.norm(g_dir)
+        if g_norm < 1e-6:
+            raise RuntimeError(f"{self.name}: 静止段加速度模长为 0，无法估计重力方向")
+        g_dir = g_dir / g_norm
 
-        # 陀螺仪积分
-        q_dot_gyro = 0.5 * np.array([
-            -qx * g[0] - qy * g[1] - qz * g[2],
-            qw * g[0] + qy * g[2] - qz * g[1],
-            qw * g[1] - qx * g[2] + qz * g[0],
-            qw * g[2] + qx * g[1] - qy * g[0],
-        ])
+        # 把设备系下的 g_dir 对齐到世界重力方向
+        R0, _ = R.align_vectors(self.gravity_target[None, :], g_dir[None, :])
 
-        # 梯度下降修正
-        f = np.array([
-            2 * (qx * qz - qw * qy) - ax_,
-            2 * (qw * qx + qy * qz) - ay_,
-            2 * (0.5 - qx * qx - qy * qy) - az_,
-        ])
-        J = np.array([
-            [-2 * qy,  2 * qz, -2 * qw, 2 * qx],
-            [ 2 * qx,  2 * qw,  2 * qz, 2 * qy],
-            [ 0.0,    -4 * qx, -4 * qy, 0.0   ],
-        ])
-        step = J.T @ f
-        step_norm = np.linalg.norm(step)
-        if step_norm > 0:
-            step /= step_norm
+        acc_w = R0.apply(acc)
+        gyro_w = R0.apply(gyro)
 
-        q_new = q + (q_dot_gyro - beta * step) * dt
-        return q_new / np.linalg.norm(q_new)
+        if not self.quiet:
+            print(f"  [static align] {self.name}: g_dir={np.round(g_dir, 3)}")
 
-    def _estimate_orientation(self, acc, gyro, time):
-        """用 Madgwick 逐帧估计传感器到重力坐标系的姿态四元数。"""
-        gyro_rad = np.deg2rad(gyro)
-        n = len(time)
-        q = np.empty((n, 4))
-        q[0] = np.array([1.0, 0.0, 0.0, 0.0])
-
-        dt = np.diff(time)
-        for i in range(1, n):
-            q[i] = self._madgwick_step(
-                q[i - 1], gyro_rad[i], acc[i], dt[i - 1], self.madgwick_beta
-            )
-        return q
-
-    def _gravity_align(self, acc, gyro, time):
-        """把 acc 和 gyro 旋转到重力坐标系，返回对齐后的 (acc, gyro, q)。"""
-        q = self._estimate_orientation(acc, gyro, time)
-        # q 的格式是 [w,x,y,z]，scipy 需要 [x,y,z,w]
-        rot = R.from_quat(q[:, [1, 2, 3, 0]]).inv()
-        acc_w = rot.apply(acc)
-        gyro_w = rot.apply(gyro)
-        return acc_w, gyro_w, q
+        return acc_w, gyro_w, R0, g_dir
 
     def preprocess(self):
         raw_6axis = np.hstack([self.acc, self.gyro])
@@ -133,7 +116,6 @@ class DataPreprocess(Data):
         # ---------- 删除前 90 秒和后 60 秒，保留绝对时间戳 ----------
         t0 = self.time[0]
         t_end = self.time[-1]
-
         keep = (
             (self.time >= t0 + DROP_FIRST_SECONDS)
             & (self.time <= t_end - DROP_LAST_SECONDS)
@@ -157,16 +139,12 @@ class DataPreprocess(Data):
         acc = raw_6axis[:, :3]
         gyro = raw_6axis[:, 3:]
 
-        # ---------- Madgwick 重力对齐：放在滤波和降采样之前 ----------
-        if self.use_madgwick:
-            if not self.quiet:
-                print(f"  [Madgwick align] {self.name}")
-            acc, gyro, q = self._gravity_align(acc, gyro, self.time)
-            if self.save_orientation:
-                self.quaternions = q
+        # ---------- 静态重力对齐 ----------
+        if self.use_gravity_align:
+            acc, gyro, _, _ = self._static_gravity_alignment(acc, gyro, self.time)
+        # ---------------------------------
 
         raw_6axis = np.hstack([acc, gyro])
-        # -------------------------------------------------------------
 
         dt = np.median(np.diff(self.time))
         fs_orig = 1.0 / dt if dt > 0 else 100.0
@@ -182,22 +160,8 @@ class DataPreprocess(Data):
             self.features = filtered[::factor]
             self.time = self.time[::factor]
             self.interp_mask = self.interp_mask[::factor]
-            if self.quaternions is not None:
-                self.quaternions = self.quaternions[::factor]
         else:
             self.features = filtered
-
-        # ---------- per-device z-score 归一化 ----------
-        if self.device_stats is not None:
-            dev = extract_device_id(self.name)
-            if dev in self.device_stats:
-                stat = self.device_stats[dev]
-                self.features = (self.features - stat["mean"]) / stat["std"]
-                if not self.quiet:
-                    print(f"  [z-score {dev}] {self.name}")
-            else:
-                print(f"  警告: {self.name} 的设备 {dev} 无统计量，跳过 z-score")
-        # ------------------------------------------------
 
         return self
 
@@ -208,79 +172,12 @@ class DataPreprocess(Data):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        save_dict = {
-            "features": self.features.astype(np.float32),
-            "time": self.time,
-            "interp_mask": self.interp_mask,
-        }
-        if self.save_orientation and self.quaternions is not None:
-            save_dict["quaternions"] = self.quaternions.astype(np.float32)
-
         np.savez_compressed(
             out_dir / f"{self.name}.npz",
-            **save_dict,
+            features=self.features.astype(np.float32),
+            time=self.time,
+            interp_mask=self.interp_mask,
         )
-
-
-def _compute_device_stats(cfg):
-    """第一轮预处理：不做 z-score，累积每个设备的均值和方差。"""
-    raw_dir = ROOT / cfg["project"]["raw_dir"]
-    fc = cfg["preprocess"]
-    flip_xz = fc.get("flip_xz_recordings", [])
-
-    sums = {}
-    sumsqs = {}
-    counts = {}
-
-    csv_files = sorted(raw_dir.glob("*.csv"))
-    if not csv_files:
-        raise FileNotFoundError(f"{raw_dir} 中没有 csv 文件")
-
-    print("=== 第一轮：计算 per-device 统计量 ===")
-    for csv_path in csv_files:
-        proc = DataPreprocess(
-            csv_path,
-            preprocess_cfg=fc,
-            cutoff=fc.get("lowpass_cutoff", 25.0),
-            order=fc.get("lowpass_order", 4),
-            flip_xz=flip_xz,
-            quiet=True,
-        )
-        proc.preprocess()
-        if proc.features is None or len(proc.features) == 0:
-            continue
-
-        dev = extract_device_id(proc.name)
-        feat = proc.features
-
-        sums[dev] = sums.get(dev, 0.0) + feat.sum(axis=0)
-        sumsqs[dev] = sumsqs.get(dev, 0.0) + (feat ** 2).sum(axis=0)
-        counts[dev] = counts.get(dev, 0) + feat.shape[0]
-
-    eps = fc.get("zscore_eps", 1e-8)
-    stats = {}
-    for dev in sums:
-        mean = sums[dev] / counts[dev]
-        var = sumsqs[dev] / counts[dev] - mean ** 2
-        std = np.sqrt(np.maximum(var, 0.0)) + eps
-        stats[dev] = {"mean": mean.astype(np.float32),
-                      "std": std.astype(np.float32),
-                      "count": counts[dev]}
-    return stats
-
-
-def _save_device_stats(stats, out_dir):
-    """把 per-device 统计量保存到 metadata 子目录，避免被 train.py 误加载。"""
-    out_dir = Path(out_dir) / "metadata"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    np.savez_compressed(
-        out_dir / "device_zscore_stats.npz",
-        **{f"{dev}_mean": s["mean"] for dev, s in stats.items()},
-        **{f"{dev}_std":  s["std"]  for dev, s in stats.items()},
-        **{f"{dev}_count": np.array(s["count"]) for dev, s in stats.items()},
-        devices=np.array(list(stats.keys())),
-    )
 
 
 def preprocess_all(cfg):
@@ -291,27 +188,15 @@ def preprocess_all(cfg):
 
     flip_xz = fc.get("flip_xz_recordings", [])
 
-    per_device_zscore = fc.get("per_device_zscore", False)
-    device_stats = _compute_device_stats(cfg) if per_device_zscore else None
-
-    if per_device_zscore:
-        print("已启用 per-device z-score，各设备统计：")
-        for dev, s in sorted(device_stats.items()):
-            print(f"  {dev}: count={s['count']}, "
-                  f"mean={np.round(s['mean'], 4)}, "
-                  f"std={np.round(s['std'], 4)}")
-        _save_device_stats(device_stats, out)
-
     csv_files = sorted(raw_dir.glob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"{raw_dir} 中没有 csv 文件")
 
-    print("=== 第二轮：归一化并保存 ===")
+    print("=== 批量预处理：静态对齐 -> 低通 -> 降采样 ===")
     for csv_path in csv_files:
         out_path = out / f"{csv_path.stem}.npz"
 
-        # 启用 z-score 时强制重新生成（预处理配置已变化）
-        if out_path.exists() and not per_device_zscore:
+        if out_path.exists():
             print(f"跳过（已存在） {csv_path.stem}")
             continue
 
@@ -322,7 +207,6 @@ def preprocess_all(cfg):
             cutoff=fc.get("lowpass_cutoff", 25.0),
             order=fc.get("lowpass_order", 4),
             flip_xz=flip_xz,
-            device_stats=device_stats,
         )
         proc.preprocess()
 

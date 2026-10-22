@@ -170,7 +170,7 @@ class HSMM:
 
         return states
 
-    def fit(self, X, n_iter=20, min_d=10):
+    def fit(self, X, n_iter=20, min_d=5):
         """单段 Viterbi EM 训练。"""
         T = len(X)
         print(f"HSMM 单段训练: T={T}, K={self.n_states}, D_max={self.d_max}, min_d={min_d}")
@@ -224,7 +224,7 @@ class HSMM:
 
         return self
 
-    def fit_segments(self, segments, n_iter=20, min_d=10):
+    def fit_segments(self, segments, n_iter=20, min_d=5):
         """多段并行 Viterbi EM：段间不连接，每轮聚合统计量。"""
         n_segs = len(segments)
         print(f"HSMM 分段训练: {n_segs} 段/轮, K={self.n_states}, D_max={self.d_max}, min_d={min_d}")

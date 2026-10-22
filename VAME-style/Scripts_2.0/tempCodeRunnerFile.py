@@ -1,1 +1,1 @@
-np.save
+min_d
