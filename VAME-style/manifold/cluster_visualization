@@ -1,0 +1,107 @@
+"""
+Density-peaks 分割结果可视化。
+
+用法：
+    python plot_dpc.py --states_path path/to/xxx_dpc_states.npz
+"""
+import argparse
+import sys
+
+print(sys.executable)
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+def get_2d_embedding(X, seed=0):
+    """优先 UMAP，没有则退回 PCA。"""
+    try:
+        import umap
+        print("使用 UMAP 嵌入")
+        return umap.UMAP(n_neighbors=30, min_dist=0.3,
+                         random_state=seed).fit_transform(X)
+    except ImportError:
+        print("未安装 umap-learn，退回 PCA")
+        Xc = X - X.mean(axis=0)
+        U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+        return U[:, :2] * S[:2]
+
+def main():
+    parser = argparse.ArgumentParser(description="DPC 分割结果可视化")
+    parser.add_argument("--states_path", required=True, help="*_dpc_states.npz")
+    parser.add_argument("--out_path", help="输出 png 路径（默认同名 _viz.png）")
+    parser.add_argument("--max_seg_lines", type=int, default=500,
+                        help="时间轴上最多绘制的段数（超出则抽样）")
+    args = parser.parse_args()
+
+    d = np.load(args.states_path)
+    labels = d["states"]
+    latent = d["latent"]
+    lengths = d["segment_lengths"]
+    starts = d["segment_starts"]
+    rho, delta = d["rho"], d["delta"]
+    time_ds = d["time"] if "time" in d else np.arange(len(labels))
+    n_states = len(np.unique(labels))
+
+    out_path = args.out_path or args.states_path.replace("_dpc_states.npz",
+                                                         "_dpc_viz.png")
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    # ---- 1. 决策图：rho vs delta，gamma 着色 ----
+    ax = axes[0, 0]
+    gamma = rho * delta
+    sc = ax.scatter(rho, delta, c=np.log10(gamma + 1e-12),
+                    s=3, cmap="viridis", alpha=0.5)
+    plt.colorbar(sc, ax=ax, label="log10(gamma)")
+    # 标出已被选为峰的点（gamma 前 n_states 名）
+    top = np.argsort(-gamma)[:n_states]
+    ax.scatter(rho[top], delta[top], facecolors="none",
+               edgecolors="red", s=40, linewidths=1.0, label=f"peaks (n={n_states})")
+    ax.set_xlabel("rho (local density)")
+    ax.set_ylabel("delta (dist to higher density)")
+    ax.set_title("决策图：红圈 = 当前选中的峰")
+    ax.legend()
+    ax.set_yscale("log")
+
+    # ---- 2. 嵌入着色 ----
+    ax = axes[0, 1]
+    emb = get_2d_embedding(latent)
+    ax.scatter(emb[:, 0], emb[:, 1], c=labels, cmap="tab20",
+               s=2, alpha=0.4)
+    ax.set_title(f"嵌入着色（{n_states} 个模态）")
+    ax.set_xlabel("dim 1")
+    ax.set_ylabel("dim 2")
+
+    # ---- 3. 状态时间轴 ----
+    ax = axes[1, 0]
+    sel = np.arange(len(starts))
+    if len(sel) > args.max_seg_lines:
+        sel = np.random.default_rng(0).choice(len(starts),
+                                              args.max_seg_lines,
+                                              replace=False)
+    for si in sel:
+        s, L = starts[si], lengths[si]
+        ax.hlines(labels[s], time_ds[s], time_ds[min(s + L - 1, len(time_ds) - 1)],
+                  colors=plt.cm.tab20(labels[s] % 20), linewidth=2)
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("state label")
+    ax.set_title(f"状态时间轴（片段数 {len(starts)}，抽样显示 {len(sel)}）")
+    ax.set_yticks(range(n_states))
+
+    # ---- 4. 段长分布 ----
+    ax = axes[1, 1]
+    fs = 100.0 / float(d["downsample"]) if "downsample" in d else 25.0
+    ax.hist(lengths / fs, bins=60, color="steelblue", edgecolor="white")
+    ax.set_xlabel("segment duration (s)")
+    ax.set_ylabel("count")
+    ax.set_title(f"段长分布（中位 {np.median(lengths)/fs:.2f}s，"
+                 f"最短 {lengths.min()/fs:.2f}s）")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    print(f"图已保存: {out_path}")
+
+if __name__ == "__main__":
+    main()

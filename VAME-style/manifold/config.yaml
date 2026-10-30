@@ -1,0 +1,54 @@
+project:
+  name: imu_pose_ae
+  raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\manifold_test
+  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\manifold_3
+
+preprocess:
+  lowpass_cutoff: 10.0
+  lowpass_order: 4
+  # target_fs 已移除，不再降采样
+  reference_name: "A1_C1_A1-6d"
+  sphere_samples: 30
+  twist_step: 10.0
+  use_madgwick: true
+  acc_unit: "g"
+  gyro_unit: "deg/s"
+  madgwick_beta: 0.1
+  flip_xz_recordings: []
+  drop_first_seconds: 90.0
+  drop_last_seconds: 60.0
+
+model:
+  in_features: 6
+  z_dim: 6
+  pad_mode: "replicate"
+  cnn_channels: [32, 64, 64]
+  kernel_sizes: [7, 5, 5]
+  gru_hidden: 64
+  gru_layers: 1
+  decoder_hidden: [64, 128]
+  dynamics_hidden: [64, 64]
+
+train:
+  chunk: 2048
+  batch_size: 32
+  epochs: 200
+  lr: 0.001
+  seed: 0
+  val_ratio: 0.2
+  val_files: []
+  rec_weight: 1.0
+  smooth_weight: 0.4
+  dyn_weight: 0.2
+  curve_weight: 0.2
+  grad_clip: 1.0
+  save_latent: true
+
+hdp_hsmm:
+  K_max: 30              # HDP 状态数上限
+  d_max_sec: 5.0         # 最大时长（秒）
+  min_duration_frames: 5 # 最小时长帧数
+  alpha: 1.0             # HDP 状态先验浓度
+  gamma: 1.0             # HDP stick-breaking 浓度
+  n_iter: 50            # Gibbs 迭代数
+  seed: 0                # 随机种子

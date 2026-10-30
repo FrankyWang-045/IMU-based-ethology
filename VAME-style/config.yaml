@@ -1,8 +1,8 @@
 # IMU Pose-VAE 行为分析管线配置
 project:
   name: imu_pose_vae
-  raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\容量测试\n=14              # 原始 csv 文件夹
-  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\容量测试\n=14           # 所有产物的根目录
+  raw_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\容量测试\n=4              # 原始 csv 文件夹
+  output_dir: F:\IMU_computational_ethology\Data\VAME-Style-Data\容量测试\n=4           # 所有产物的根目录
 
 preprocess:
   lowpass_cutoff: 12.5      # 或 25.0
@@ -51,7 +51,7 @@ train:
 
 
 hmm:
-  n_states: 55
+  n_states: 30
   hsmm_sticky_beta: 0.0001
   min_duration_frames: 5
   hsmm_d_max_sec: 20
@@ -66,9 +66,20 @@ hmm:
   hsmm_n_rounds: 30                   # 共 30 轮
 
 hmm_scan:
-  k_list: [19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63, 65, 67, 69, 71, 73, 75, 77]
+  k_list: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
   hsmm_scan_n_iter: 10
   hsmm_scan_segment_length: 1000
   hsmm_scan_n_segments: 10
   hsmm_scan_seed: 0
   hsmm_scan_n_init: 10
+
+hsmm_selection:           # 新增段
+  k_list: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
+  fixed_length_lstar: 10000
+  n_random_inits: 5
+  length_grid: [1000, 2000, 4000, 8000]
+  bootstrap_runs: 20
+  occupancy_threshold: 0.01
+  hdp_alpha: 1.0
+  hdp_gamma: 1.0
+  hdp_mcmc_iter: 200

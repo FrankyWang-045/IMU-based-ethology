@@ -1,0 +1,73 @@
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from utils import load_config, output_dir
+
+COLUMNS = ["ax", "ay", "az", "wx", "wy", "wz"]
+
+
+def load_features(npz_path):
+    return np.load(npz_path)["features"]
+
+
+def plot_axis_distributions(ax, features_list, names, colors, bins=200, title=None):
+    for features, name, color in zip(features_list, names, colors):
+        ax.hist(
+            features,
+            bins=bins,
+            density=True,
+            histtype="step",
+            label=name,
+            color=color,
+            alpha=0.75,
+            linewidth=1.2,
+        )
+    if title:
+        ax.set_title(title)
+    ax.set_ylabel("density")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(loc="best", fontsize=6)
+
+
+def plot_recording_distributions(
+    cfg, bins=200, clip_percentiles=(1, 99), figsize=(14, 10)
+):
+    out = output_dir(cfg)
+
+    npz_files = sorted(out.glob("*.npz"))
+    if not npz_files:
+        raise FileNotFoundError(f"未找到 npz 文件: {out}")
+
+    names = [p.stem for p in npz_files]
+    paths = npz_files
+
+    cmap = plt.cm.get_cmap("tab10", len(names))
+    colors = [cmap(i) for i in range(len(names))]
+
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    axes = axes.flatten()
+
+    for i, ax in enumerate(axes):
+        features_list = [load_features(p)[:, i] for p in paths]
+        plot_axis_distributions(ax, features_list, names, colors, bins=bins, title=COLUMNS[i])
+
+        if clip_percentiles is not None:
+            all_vals = np.concatenate(features_list)
+            lo, hi = np.percentile(all_vals, clip_percentiles)
+            margin = (hi - lo) * 0.05
+            ax.set_xlim(lo - margin, hi + margin)
+
+    plt.suptitle("Aligned feature distribution by recording", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    save_path = out / "recording_distribution.png"
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"已保存: {save_path}")
+    plt.show()
+
+
+if __name__ == "__main__":
+    cfg = load_config()
+    plot_recording_distributions(cfg)
